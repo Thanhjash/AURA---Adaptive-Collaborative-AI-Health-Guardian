@@ -1,0 +1,11 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.git
+.gitignore
+README.md
+.vscode
+.pytest_cache
+requirements-dev.txt
+activate_env.sh

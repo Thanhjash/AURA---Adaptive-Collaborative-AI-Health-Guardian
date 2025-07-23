@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   aura_main:
     build: ./services/aura_main
