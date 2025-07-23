@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  aura_main:
+    build: ./services/aura_main
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=development
+    depends_on:
+      - ecg_interpreter
+      - radiology_vqa
+      - mental_wellness
+    networks:
+      - aura_network
+
+  ecg_interpreter:
+    build: ./services/ecg_interpreter
+    ports:
+      - "8001:8001"
+    networks:
+      - aura_network
+
+  radiology_vqa:
+    build: ./services/radiology_vqa
+    ports:
+      - "8002:8002"
+    networks:
+      - aura_network
+
+  mental_wellness:
+    build: ./services/mental_wellness
+    ports:
+      - "8003:8003"
+    networks:
+      - aura_network
+
+networks:
+  aura_network:
+    driver: bridge
