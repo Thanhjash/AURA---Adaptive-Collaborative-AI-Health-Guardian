@@ -22,3 +22,6 @@ models/weights/
 *.pth
 logs/
 *.log
+.hf_cache
+.vscode
+.env
