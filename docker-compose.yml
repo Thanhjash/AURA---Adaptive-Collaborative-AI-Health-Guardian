@@ -60,6 +60,7 @@ services:
       - "8000:8000"
     environment:
       - ENV=development
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     depends_on:
       - ecg_interpreter
       - radiology_vqa 

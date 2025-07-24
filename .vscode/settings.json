@@ -7,11 +7,12 @@
     "python.formatting.blackArgs": ["--line-length", "88"],
     "python.analysis.extraPaths": [
         "./services/aura_main",
-        "./services/ecg_interpreter", 
+        "./services/ecg_interpreter",
         "./services/radiology_vqa",
         "./services/mental_wellness",
         "./services/ai_server",
-        "./scripts"
+        "./scripts",
+        "./services/aura_main"
     ],
     "python.analysis.autoSearchPaths": true,
     "files.exclude": {
