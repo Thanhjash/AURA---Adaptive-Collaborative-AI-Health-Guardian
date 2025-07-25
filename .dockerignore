@@ -9,3 +9,5 @@ README.md
 .pytest_cache
 requirements-dev.txt
 activate_env.sh
+*.pyc
+__pycache__/

@@ -17,6 +17,12 @@ services:
               capabilities: [gpu]
     networks:
       - aura_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 90s  # Allow time for MedGemma model loading
 
   ecg_interpreter:
     build: ./services/ecg_interpreter
@@ -33,13 +39,20 @@ services:
               capabilities: [gpu]
     networks:
       - aura_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
   radiology_vqa:
     build: ./services/radiology_vqa
     ports:
       - "8002:8002"
     depends_on:
-      - ai_server
+      ai_server:
+        condition: service_healthy
     networks:
       - aura_network
 
@@ -48,7 +61,8 @@ services:
     ports:
       - "8003:8003"
     depends_on:
-      - ai_server
+      ai_server:
+        condition: service_healthy
     networks:
       - aura_network
 
@@ -62,10 +76,14 @@ services:
       - ENV=development
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     depends_on:
-      - ecg_interpreter
-      - radiology_vqa 
-      - mental_wellness
-      - ai_server
+      ai_server:
+        condition: service_healthy
+      ecg_interpreter:
+        condition: service_healthy
+      radiology_vqa:
+        condition: service_started
+      mental_wellness:
+        condition: service_started
     networks:
       - aura_network
 

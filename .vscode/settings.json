@@ -12,6 +12,8 @@
         "./services/mental_wellness",
         "./services/ai_server",
         "./scripts",
+        "./services/aura_main",
+        "./services/aura_main",
         "./services/aura_main"
     ],
     "python.analysis.autoSearchPaths": true,
