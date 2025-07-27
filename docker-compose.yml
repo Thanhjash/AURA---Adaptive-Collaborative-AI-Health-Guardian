@@ -8,6 +8,7 @@ services:
     environment:
       - HF_HOME=/app/.hf_cache
       - CUDA_VISIBLE_DEVICES=0
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY} 
     deploy:
       resources:
         reservations:
@@ -72,6 +73,8 @@ services:
       dockerfile: services/aura_main/Dockerfile
     ports:
       - "8000:8000"
+    volumes:
+      - ./config:/app/config
     environment:
       - ENV=development
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}

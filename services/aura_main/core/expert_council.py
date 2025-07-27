@@ -1,662 +1,635 @@
 # services/aura_main/core/expert_council.py
 """
-AURA Expert Council - Enhanced MedAgent-Pro with Structured Output
-Philosophy: Fail Fast & Honestly + Structured JSON Output
+Enhanced Expert Council with Session Observability
+Implements complete session logging with try/finally pattern for guaranteed observability
 """
-import os
-import json
 import asyncio
 import httpx
-from typing import Dict, Any, List, Optional, Callable
+import time
+import json
 from datetime import datetime
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass
 import google.generativeai as genai
-from lib.utils import parse_llm_json_response, clean_llm_response
+import os
 
-# Configure Gemini API
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+# Import for session logging
+from lib.personalization_manager import PersonalizationManager
 
 class ExpertCouncilError(Exception):
-    """Custom exception for Expert Council failures"""
-    def __init__(self, step: str, message: str, details: str = ""):
-        self.step = step
+    """Custom exception for Expert Council errors with step tracking"""
+    def __init__(self, message: str, step: str, error_type: str = "expert_council_error"):
         self.message = message
-        self.details = details
-        super().__init__(f"Step {step} failed: {message}")
+        self.step = step
+        self.error_type = error_type
+        super().__init__(self.message)
+
+@dataclass
+class ExpertCouncilStep:
+    """Data class for tracking individual council steps"""
+    step_name: str
+    description: str
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    success: bool = False
+    output: Optional[str] = None
+    error: Optional[str] = None
+    duration_seconds: float = 0.0
 
 class ExpertCouncil:
     """
-    Enhanced Expert Council with structured output and fail-fast philosophy
+    Enhanced Expert Council with guaranteed session observability
+    Implements MedAgent-Pro methodology with comprehensive logging
     """
     
     def __init__(self):
+        # Initialize Gemini clients
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("⚠️ GOOGLE_API_KEY not found - Expert Council will fail")
+            self.gemini_enabled = False
+        else:
+            genai.configure(api_key=api_key)
+            self.coordinator_client = genai.GenerativeModel('gemini-2.0-flash')
+            self.reasoner_client = genai.GenerativeModel('gemini-2.5-flash')
+            self.critic_client = genai.GenerativeModel('gemini-2.0-flash')
+            self.gemini_enabled = True
+        
+        # Initialize session logger
+        self.pm = PersonalizationManager()
+        
+        # HTTP client for microservice calls
         self.timeout = httpx.Timeout(60.0)
-        
-        # Initialize Gemini models
-        self.coordinator_model = genai.GenerativeModel('gemini-2.0-flash')
-        self.complex_reasoner_model = genai.GenerativeModel('gemini-2.5-flash')
-        self.critique_model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # Evidence gathering tools
-        self.available_tools = {
-            "ecg_analysis": "http://ecg_interpreter:8001/analyze",
-            "vqa_analysis": "http://ai_server:9000/ai/vqa", 
-            "knowledge_base_lookup": "rag_system",
-            "wellness_analysis": "http://ai_server:9000/ai/wellness"
-        }
-        
-    async def run_expert_council(self, query: str, user_context: str, rag_context: str, 
-                               status_callback: Optional[Callable] = None) -> Dict[str, Any]:
+    
+    async def run_expert_council(
+        self, 
+        query: str, 
+        user_context: str = "", 
+        rag_context: str = ""
+    ) -> Dict[str, Any]:
         """
-        Execute MedAgent-Pro workflow with fail-fast philosophy and structured output
+        Enhanced Expert Council with guaranteed session observability
+        Uses try/finally to ensure session is ALWAYS logged regardless of success/failure
         """
-        session_id = f"council_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
         
-        def update_status(step: str, message: str):
-            if status_callback:
-                status_callback({"step": step, "message": message, "session_id": session_id})
-            print(f"🔍 {step}: {message}")
+        # Generate unique session ID
+        session_id = f"council_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}"
+        start_time = time.time()
+        
+        # Initialize council result and step tracking
+        council_result = {}
+        steps_completed = []
+        current_step = "initialization"
+        
+        # Extract user_id from query context for logging (if available)
+        user_id = self._extract_user_id_from_context(user_context) or "anonymous"
         
         try:
-            # FAIL FAST: Check AI server availability first
-            update_status("system_check", "Verifying AI server availability...")
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-                try:
-                    response = await client.get("http://ai_server:9000/health")
-                    if response.status_code != 200:
-                        raise ExpertCouncilError(
-                            "system_check", 
-                            "AI server health check failed",
-                            f"Health endpoint returned status {response.status_code}"
-                        )
-                except Exception as e:
-                    raise ExpertCouncilError(
-                        "system_check",
-                        "AI server unavailable", 
-                        f"Cannot connect to MedGemma service: {str(e)}"
-                    )
-            # Step 1: Planning (FAIL FAST - NO FALLBACKS)
-            update_status("diagnostic_planning", "Creating evidence-based diagnostic plan...")
-            evidence_plan = await self._create_diagnostic_plan_strict(query)
+            print(f"🏥 Expert Council Session {session_id} starting...")
             
-            # Step 2: Evidence Gathering  
-            update_status("evidence_gathering", "Gathering clinical evidence...")
-            evidence = await self._gather_evidence(evidence_plan, query, user_context, rag_context)
+            # === SYSTEM CHECK (FAIL-FAST) ===
+            current_step = "system_check"
+            system_check_step = ExpertCouncilStep("system_check", "Verify all required services are operational")
+            system_check_step.started_at = datetime.utcnow()
             
-            # Step 3: Expert Analysis (Parallel)
-            update_status("expert_analysis", "Multiple experts analyzing case...")
-            expert_analyses = await self._run_independent_analysis(query, evidence, user_context)
+            if not await self._system_health_check():
+                system_check_step.success = False
+                system_check_step.error = "Critical services unavailable"
+                system_check_step.completed_at = datetime.utcnow()
+                steps_completed.append(system_check_step)
+                
+                raise ExpertCouncilError(
+                    "System health check failed - critical services unavailable", 
+                    "system_check",
+                    "system_unavailable"
+                )
             
-            # Step 4: Structured Synthesis (JSON OUTPUT)
-            update_status("synthesis", "Synthesizing expert opinions into structured report...")
-            structured_report = await self._synthesize_structured_report(expert_analyses, evidence)
+            system_check_step.success = True
+            system_check_step.completed_at = datetime.utcnow()
+            system_check_step.duration_seconds = (system_check_step.completed_at - system_check_step.started_at).total_seconds()
+            steps_completed.append(system_check_step)
             
-            # Step 5: Critical Review (STRUCTURED)
-            update_status("critical_review", "Running safety and accuracy review...")
-            structured_critique = await self._run_structured_critique(structured_report, evidence)
+            # === STEP 1: COORDINATOR PLANNING ===
+            current_step = "coordinator_planning"
+            planning_step = ExpertCouncilStep("coordinator_planning", "Strategic analysis and expert consultation planning")
+            planning_step.started_at = datetime.utcnow()
             
-            # Step 6: Final Refinement (STRUCTURED)
-            update_status("refinement", "Refining analysis based on critique...")
-            final_structured_analysis = await self._refine_structured_analysis(structured_report, structured_critique)
+            coordinator_analysis = await self._coordinator_planning(query, user_context, rag_context)
             
-            # Step 7: User Response Generation
-            update_status("response_generation", "Generating personalized response...")
-            user_response = await self._generate_user_response_from_structure(final_structured_analysis, query, user_context)
+            planning_step.success = True
+            planning_step.output = coordinator_analysis[:200] + "..." if len(coordinator_analysis) > 200 else coordinator_analysis
+            planning_step.completed_at = datetime.utcnow()
+            planning_step.duration_seconds = (planning_step.completed_at - planning_step.started_at).total_seconds()
+            steps_completed.append(planning_step)
             
-            update_status("completed", "Expert Council analysis complete")
+            # === STEP 2: EVIDENCE GATHERING ===
+            current_step = "evidence_gathering"
+            evidence_step = ExpertCouncilStep("evidence_gathering", "Collect medical evidence and specialist insights")
+            evidence_step.started_at = datetime.utcnow()
             
-            return {
+            medical_evidence = await self._gather_medical_evidence(query, user_context, rag_context)
+            
+            evidence_step.success = True
+            evidence_step.output = f"Gathered {len(medical_evidence.get('sources', []))} evidence sources"
+            evidence_step.completed_at = datetime.utcnow()
+            evidence_step.duration_seconds = (evidence_step.completed_at - evidence_step.started_at).total_seconds()
+            steps_completed.append(evidence_step)
+            
+            # === STEP 3: COMPLEX REASONING ===
+            current_step = "complex_reasoning"
+            reasoning_step = ExpertCouncilStep("complex_reasoning", "Advanced diagnostic reasoning and pattern analysis")
+            reasoning_step.started_at = datetime.utcnow()
+            
+            complex_analysis = await self._complex_reasoning(query, coordinator_analysis, medical_evidence)
+            
+            reasoning_step.success = True
+            reasoning_step.output = complex_analysis[:200] + "..." if len(complex_analysis) > 200 else complex_analysis
+            reasoning_step.completed_at = datetime.utcnow()
+            reasoning_step.duration_seconds = (reasoning_step.completed_at - reasoning_step.started_at).total_seconds()
+            steps_completed.append(reasoning_step)
+            
+            # === STEP 4: SAFETY CRITIQUE ===
+            current_step = "safety_critique"
+            critique_step = ExpertCouncilStep("safety_critique", "Clinical safety review and risk assessment")
+            critique_step.started_at = datetime.utcnow()
+            
+            safety_critique = await self._safety_critique(query, complex_analysis, medical_evidence)
+            
+            critique_step.success = True
+            critique_step.output = safety_critique[:200] + "..." if len(safety_critique) > 200 else safety_critique
+            critique_step.completed_at = datetime.utcnow()
+            critique_step.duration_seconds = (critique_step.completed_at - critique_step.started_at).total_seconds()
+            steps_completed.append(critique_step)
+            
+            # === STEP 5: CONSENSUS SYNTHESIS ===
+            current_step = "consensus_synthesis"
+            synthesis_step = ExpertCouncilStep("consensus_synthesis", "Synthesize expert opinions into unified assessment")
+            synthesis_step.started_at = datetime.utcnow()
+            
+            consensus_result = await self._consensus_synthesis(
+                query, coordinator_analysis, complex_analysis, safety_critique, medical_evidence
+            )
+            
+            synthesis_step.success = True
+            synthesis_step.output = "Consensus reached with confidence assessment"
+            synthesis_step.completed_at = datetime.utcnow()
+            synthesis_step.duration_seconds = (synthesis_step.completed_at - synthesis_step.started_at).total_seconds()
+            steps_completed.append(synthesis_step)
+            
+            # === STEP 6: STRUCTURED OUTPUT GENERATION ===
+            current_step = "structured_output"
+            output_step = ExpertCouncilStep("structured_output", "Generate structured analysis and interactive components")
+            output_step.started_at = datetime.utcnow()
+            
+            structured_output = await self._generate_structured_output(consensus_result, medical_evidence)
+            
+            output_step.success = True
+            output_step.output = "Generated structured analysis with interactive components"
+            output_step.completed_at = datetime.utcnow()
+            output_step.duration_seconds = (output_step.completed_at - output_step.started_at).total_seconds()
+            steps_completed.append(output_step)
+            
+            # === STEP 7: USER RESPONSE FORMATTING ===
+            current_step = "user_response"
+            response_step = ExpertCouncilStep("user_response", "Format final response for user presentation")
+            response_step.started_at = datetime.utcnow()
+            
+            user_response = await self._format_user_response(consensus_result, structured_output)
+            
+            response_step.success = True
+            response_step.output = "User response formatted successfully"
+            response_step.completed_at = datetime.utcnow()
+            response_step.duration_seconds = (response_step.completed_at - response_step.started_at).total_seconds()
+            steps_completed.append(response_step)
+            
+            # === SUCCESS: BUILD COMPLETE RESULT ===
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            council_result = {
                 "session_id": session_id,
                 "success": True,
                 "user_response": user_response,
-                "structured_analysis": final_structured_analysis,  # NEW: Full structured data
-                "confidence": self._calculate_confidence_from_structure(final_structured_analysis),
-                "interactive_components": self._generate_ui_components(final_structured_analysis),  # NEW: UI data
+                "confidence": structured_output.get("confidence_assessment", {}).get("overall_confidence", 0.7),
+                "structured_analysis": structured_output.get("structured_analysis", {}),
+                "interactive_components": structured_output.get("interactive_components", {}),
                 "reasoning_trace": {
-                    "diagnostic_plan": evidence_plan,
-                    "evidence_gathered": self._sanitize_evidence(evidence),
-                    "expert_analyses": {k: v[:200] + "..." for k, v in expert_analyses.items()},
-                    "structured_synthesis": structured_report,
-                    "structured_critique": structured_critique,
-                    "final_analysis": final_structured_analysis
+                    "coordinator_analysis": coordinator_analysis,
+                    "medical_evidence": medical_evidence,
+                    "complex_analysis": complex_analysis,
+                    "safety_critique": safety_critique,
+                    "consensus_result": consensus_result
                 },
                 "metadata": {
-                    "experts_consulted": ["medgemma_4b", "gemini_2.5_reasoner", "gemini_critique"],
-                    "evidence_sources": list(evidence.keys()),
+                    "session_id": session_id,
+                    "experts_consulted": ["coordinator", "medical_expert", "complex_reasoner", "safety_critic"],
+                    "evidence_sources": medical_evidence.get("sources", []),
                     "workflow": "medagent_pro_structured_v3",
-                    "processing_steps": 7
+                    "models_used": ["gemini-2.0-flash-exp", "gemini-2.5-flash-exp", "medgemma-4b"]
+                },
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed}
+            }
+            
+            print(f"✅ Expert Council Session {session_id} completed successfully in {total_duration:.2f}s")
+            
+        except ExpertCouncilError as ece:
+            # Handle known Expert Council errors
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            print(f"❌ Expert Council Session {session_id} failed at step: {ece.step}")
+            
+            council_result = {
+                "session_id": session_id,
+                "success": False,
+                "error_type": ece.error_type,
+                "failed_step": ece.step,
+                "error_message": ece.message,
+                "suggestion": self._get_error_suggestion(ece.error_type),
+                "user_response": self._generate_error_response(ece),
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed},
+                "metadata": {
+                    "session_id": session_id,
+                    "workflow": "medagent_pro_structured_v3",
+                    "failed_at_step": current_step
                 }
             }
             
-        except ExpertCouncilError as ece:
-            # Specific Expert Council errors with detailed feedback
-            return {
+        except Exception as e:
+            # Handle unexpected errors
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            print(f"💥 Expert Council Session {session_id} crashed with unexpected error: {str(e)}")
+            
+            council_result = {
                 "session_id": session_id,
                 "success": False,
-                "error_type": "expert_council_error",
-                "failed_step": ece.step,
-                "error_message": ece.message,
-                "error_details": ece.details,
-                "user_response": self._generate_error_response(ece, query),
-                "confidence": 0.1,
-                "suggestion": self._get_error_suggestion(ece.step)
+                "error_type": "unexpected_error",
+                "failed_step": current_step,
+                "error_message": f"Unexpected error: {str(e)}",
+                "suggestion": "Please try again. If the problem persists, contact support.",
+                "user_response": "I apologize, but I encountered an unexpected technical issue. Please try your question again.",
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed},
+                "metadata": {
+                    "session_id": session_id,
+                    "workflow": "medagent_pro_structured_v3",
+                    "crashed_at_step": current_step
+                }
             }
             
-        except Exception as e:
-            # Unexpected system errors
-            return {
-                "session_id": session_id,
-                "success": False,
-                "error_type": "system_error",
-                "error_message": str(e),
-                "user_response": "I'm experiencing technical difficulties. Please try again in a moment.",
-                "confidence": 0.1
-            }
-
-    async def _create_diagnostic_plan_strict(self, query: str) -> Dict[str, Any]:
-        """
-        ENHANCED: Strict diagnostic planning - NO FALLBACKS, FAIL FAST
-        """
-        planning_prompt = f"""You are a medical diagnostic coordinator. Create an evidence-based diagnostic plan.
-
-PATIENT QUERY: "{query}"
-
-Available tools:
-- ecg_analysis: Heart rhythm/electrical analysis
-- vqa_analysis: Medical image interpretation  
-- knowledge_base_lookup: Medical literature
-- wellness_analysis: Mental health/lifestyle factors
-
-CRITICAL: Return ONLY this exact JSON structure:
-{{
-    "required_tools": ["tool1", "tool2"],
-    "priority": "high|medium|low",
-    "complexity": "simple|moderate|complex", 
-    "reasoning": "Brief diagnostic approach explanation",
-    "expected_evidence_types": ["symptom_analysis", "differential_diagnosis", "risk_assessment"]
-}}
-
-Select only tools actually needed for this specific query."""
-
-        try:
-            response = await asyncio.to_thread(
-                self.coordinator_model.generate_content, planning_prompt
-            )
-            
-            # STRICT JSON PARSING - NO FALLBACKS
-            plan_data = parse_llm_json_response(response.text)
-            if not plan_data:
-                raise ExpertCouncilError(
-                    "diagnostic_planning", 
-                    "Failed to generate valid diagnostic plan",
-                    f"LLM response was not valid JSON: {response.text[:200]}..."
-                )
-            
-            # Validate required fields
-            required_fields = ["required_tools", "priority", "complexity", "reasoning"]
-            missing_fields = [field for field in required_fields if field not in plan_data]
-            if missing_fields:
-                raise ExpertCouncilError(
-                    "diagnostic_planning",
-                    f"Diagnostic plan missing required fields: {missing_fields}",
-                    f"Received plan: {plan_data}"
-                )
-                
-            return plan_data
-            
-        except ExpertCouncilError:
-            raise  # Re-raise our specific errors
-        except Exception as e:
-            raise ExpertCouncilError(
-                "diagnostic_planning",
-                "Diagnostic planning system failure", 
-                f"Unexpected error: {str(e)}"
-            )
-
-    async def _synthesize_structured_report(self, analyses: Dict, evidence: Dict) -> Dict[str, Any]:
-        """
-        NEW: Synthesize into structured JSON format (NO TEXT BLOBS)
-        """
-        synthesis_prompt = f"""Synthesize expert medical analyses into structured format.
-
-EXPERT ANALYSES:
-Physician Assessment: {analyses.get('medgemma_physician', 'Unavailable')}
-Complex Reasoning: {analyses.get('gemini_reasoner', 'Unavailable')}
-
-CLINICAL EVIDENCE:
-{self._format_evidence_for_experts(evidence)}
-
-TASK: Create structured medical assessment in this EXACT JSON format:
-
-{{
-    "clinical_summary": {{
-        "primary_concern": "main medical issue identified",
-        "urgency_level": "low|medium|high|critical",
-        "overall_assessment": "brief clinical overview (max 2 sentences)"
-    }},
-    "differential_diagnoses": [
-        {{
-            "condition": "medical condition name",
-            "probability": "high|medium|low", 
-            "supporting_evidence": ["evidence point 1", "evidence point 2"],
-            "risk_level": "low|medium|high",
-            "next_steps": "recommended evaluation/testing"
-        }}
-    ],
-    "recommendations": {{
-        "immediate_actions": ["specific action 1", "specific action 2"],
-        "follow_up_care": ["followup item 1", "followup item 2"], 
-        "monitoring": ["what to monitor 1", "what to monitor 2"],
-        "lifestyle_modifications": ["modification 1", "modification 2"]
-    }},
-    "safety_considerations": {{
-        "red_flags": ["warning sign 1", "warning sign 2"],
-        "emergency_indicators": ["emergency sign 1", "emergency sign 2"],
-        "contraindications": ["avoid this", "be careful with that"]
-    }},
-    "confidence_assessment": {{
-        "overall_confidence": 0.75,
-        "data_completeness": 0.8,
-        "expert_consensus": 0.9,
-        "uncertainty_areas": ["area of uncertainty 1", "area of uncertainty 2"]
-    }}
-}}
-
-CRITICAL: Return ONLY the JSON object. No explanations."""
-
-        try:
-            response = await asyncio.to_thread(
-                self.coordinator_model.generate_content, synthesis_prompt
-            )
-            
-            structured_data = parse_llm_json_response(response.text)
-            if not structured_data:
-                raise ExpertCouncilError(
-                    "synthesis",
-                    "Failed to generate structured medical report",
-                    f"Could not parse JSON from synthesis response: {response.text[:200]}..."
-                )
-                
-            # Validate structure
-            required_sections = ["clinical_summary", "differential_diagnoses", "recommendations", "safety_considerations"]
-            missing_sections = [section for section in required_sections if section not in structured_data]
-            if missing_sections:
-                raise ExpertCouncilError(
-                    "synthesis",
-                    f"Structured report missing sections: {missing_sections}",
-                    f"Received structure keys: {list(structured_data.keys())}"
-                )
-                
-            return structured_data
-            
-        except ExpertCouncilError:
-            raise
-        except Exception as e:
-            raise ExpertCouncilError(
-                "synthesis",
-                "Report synthesis system failure",
-                f"Unexpected error: {str(e)}"
-            )
-
-    async def _run_structured_critique(self, structured_report: Dict, evidence: Dict) -> Dict[str, Any]:
-        """
-        NEW: Run structured critique (JSON OUTPUT)
-        """
-        critique_prompt = f"""Review this structured medical report for safety and accuracy.
-
-STRUCTURED REPORT:
-{json.dumps(structured_report, indent=2)}
-
-ORIGINAL EVIDENCE:
-{self._format_evidence_for_experts(evidence)}
-
-TASK: Provide structured critique in this EXACT JSON format:
-
-{{
-    "safety_assessment": {{
-        "critical_safety_issues": ["issue 1", "issue 2"],
-        "potential_missed_diagnoses": ["diagnosis 1", "diagnosis 2"],
-        "risk_underestimation": ["underestimated risk 1", "underestimated risk 2"]
-    }},
-    "accuracy_review": {{
-        "logical_inconsistencies": ["inconsistency 1", "inconsistency 2"],
-        "unsupported_conclusions": ["conclusion 1", "conclusion 2"],
-        "evidence_gaps": ["missing evidence 1", "missing evidence 2"]
-    }},
-    "recommendation_review": {{
-        "inappropriate_recommendations": ["recommendation 1", "recommendation 2"],
-        "missing_critical_actions": ["missing action 1", "missing action 2"],
-        "timing_concerns": ["timing issue 1", "timing issue 2"]
-    }},
-    "confidence_calibration": {{
-        "overconfident_areas": ["area 1", "area 2"],
-        "underconfident_areas": ["area 1", "area 2"],
-        "uncertainty_not_acknowledged": ["unacknowledged uncertainty 1"]
-    }},
-    "overall_critique": {{
-        "safety_score": 0.85,
-        "accuracy_score": 0.9,
-        "completeness_score": 0.8,
-        "major_concerns": ["major concern 1", "major concern 2"],
-        "minor_improvements": ["minor improvement 1", "minor improvement 2"]
-    }}
-}}
-
-CRITICAL: Return ONLY the JSON object."""
-
-        try:
-            response = await asyncio.to_thread(
-                self.critique_model.generate_content, critique_prompt
-            )
-            
-            critique_data = parse_llm_json_response(response.text)
-            if not critique_data:
-                raise ExpertCouncilError(
-                    "critical_review",
-                    "Failed to generate structured critique",
-                    f"Could not parse JSON from critique: {response.text[:200]}..."
-                )
-                
-            return critique_data
-            
-        except ExpertCouncilError:
-            raise
-        except Exception as e:
-            raise ExpertCouncilError(
-                "critical_review", 
-                "Critical review system failure",
-                f"Unexpected error: {str(e)}"
-            )
-
-    async def _refine_structured_analysis(self, original_analysis: Dict, critique: Dict) -> Dict[str, Any]:
-        """
-        NEW: Refine analysis based on structured critique
-        """
-        refinement_prompt = f"""Refine medical analysis based on structured critique.
-
-ORIGINAL ANALYSIS:
-{json.dumps(original_analysis, indent=2)}
-
-STRUCTURED CRITIQUE:
-{json.dumps(critique, indent=2)}
-
-TASK: Create improved analysis addressing critique issues. Use SAME JSON structure as original but with improvements.
-
-Address:
-- Safety concerns from critique
-- Accuracy issues identified  
-- Missing recommendations
-- Confidence calibration problems
-
-Return refined analysis with identical JSON structure but improved content.
-
-CRITICAL: Return ONLY the improved JSON object."""
-
-        try:
-            response = await asyncio.to_thread(
-                self.complex_reasoner_model.generate_content, refinement_prompt
-            )
-            
-            refined_data = parse_llm_json_response(response.text)
-            if not refined_data:
-                # If refinement fails, return original with critique notes
-                original_analysis["refinement_note"] = "Refinement failed - using original analysis"
-                original_analysis["critique_summary"] = critique.get("overall_critique", {})
-                return original_analysis
-                
-            # Add refinement metadata
-            refined_data["refinement_applied"] = True
-            refined_data["critique_addressed"] = True
-            
-            return refined_data
-            
-        except Exception as e:
-            # Graceful degradation - return original with error note
-            original_analysis["refinement_error"] = str(e)
-            return original_analysis
-
-    async def _generate_user_response_from_structure(self, structured_analysis: Dict, query: str, user_context: str) -> str:
-        """
-        Generate natural response from structured analysis
-        """
-        comm_style = "friendly and empathetic"
-        if "formal" in user_context.lower():
-            comm_style = "professional and formal"
-        
-        response_prompt = f"""Transform structured medical analysis into natural patient response.
-
-PATIENT QUESTION: {query}
-COMMUNICATION STYLE: {comm_style}
-
-STRUCTURED ANALYSIS:
-{json.dumps(structured_analysis, indent=2)}
-
-Create natural, conversational response that:
-1. Directly addresses patient's question using {comm_style} tone
-2. Explains key findings from structured analysis clearly
-3. Highlights important next steps and safety considerations
-4. Includes appropriate medical disclaimers
-5. Maintains empathy and support
-6. Avoids medical jargon
-
-Focus on most important elements from the structured data."""
-
-        try:
-            response = await asyncio.to_thread(
-                self.coordinator_model.generate_content, response_prompt
-            )
-            return clean_llm_response(response.text)
-        except Exception as e:
-            # Fallback to basic structured response
-            primary_concern = structured_analysis.get("clinical_summary", {}).get("primary_concern", "your health concern")
-            urgency = structured_analysis.get("clinical_summary", {}).get("urgency_level", "medium")
-            
-            return f"Based on our expert analysis of {primary_concern}, this appears to be a {urgency} priority situation. I recommend consulting with a healthcare professional for proper evaluation and personalized care."
-
-    def _calculate_confidence_from_structure(self, structured_analysis: Dict) -> float:
-        """Calculate confidence from structured metrics"""
-        confidence_data = structured_analysis.get("confidence_assessment", {})
-        return confidence_data.get("overall_confidence", 0.7)
-
-    def _generate_ui_components(self, structured_analysis: Dict) -> Dict[str, Any]:
-        """
-        Generate interactive UI components for frontend
-        """
-        clinical_summary = structured_analysis.get("clinical_summary", {})
-        
-        return {
-            "summary_card": {
-                "primary_concern": clinical_summary.get("primary_concern", "Health consultation completed"),
-                "urgency_level": clinical_summary.get("urgency_level", "medium"),
-                "confidence": structured_analysis.get("confidence_assessment", {}).get("overall_confidence", 0.7)
-            },
-            "diagnoses_panel": {
-                "differential_diagnoses": structured_analysis.get("differential_diagnoses", []),
-                "expandable": True
-            },
-            "action_checklist": {
-                "immediate": structured_analysis.get("recommendations", {}).get("immediate_actions", []),
-                "follow_up": structured_analysis.get("recommendations", {}).get("follow_up_care", []),
-                "monitoring": structured_analysis.get("recommendations", {}).get("monitoring", [])
-            },
-            "safety_alerts": {
-                "red_flags": structured_analysis.get("safety_considerations", {}).get("red_flags", []),
-                "emergency_signs": structured_analysis.get("safety_considerations", {}).get("emergency_indicators", []),
-                "priority": "high" if clinical_summary.get("urgency_level") in ["high", "critical"] else "medium"
-            }
-        }
-
-    def _generate_error_response(self, error: ExpertCouncilError, query: str) -> str:
-        """Generate helpful error response based on failed step"""
-        error_responses = {
-            "diagnostic_planning": f"I'm having trouble creating a diagnostic plan for your question: '{query}'. Could you try rephrasing it or providing more specific details?",
-            "evidence_gathering": "I encountered issues gathering medical evidence. Some analysis tools may be temporarily unavailable. Please try again in a moment.",
-            "expert_analysis": "Our expert analysis system is experiencing difficulties. Please try a simpler query or try again later.",
-            "synthesis": "I'm having trouble synthesizing the expert opinions into a coherent analysis. The case may be too complex for current processing.",
-            "critical_review": "Our safety review system encountered an issue. For safety, I recommend consulting directly with a healthcare professional.",
-            "refinement": "The analysis refinement process encountered an issue, but I can provide the preliminary assessment.",
-            "response_generation": "I completed the medical analysis but had trouble generating the final response. Please consult a healthcare professional about your concern."
-        }
-        
-        return error_responses.get(error.step, f"I encountered an issue during {error.step}. Please try again or consult a healthcare professional.")
-
-    def _get_error_suggestion(self, failed_step: str) -> str:
-        """Get specific suggestion based on failed step"""
-        suggestions = {
-            "diagnostic_planning": "Try rephrasing your question with more specific symptoms or details",
-            "evidence_gathering": "Check if you can provide additional context or try again in a few minutes",
-            "expert_analysis": "Consider using the progressive consultation for simpler queries",
-            "synthesis": "This query may be too complex - try breaking it into simpler questions",
-            "critical_review": "For safety concerns, always consult a healthcare professional directly",
-            "refinement": "The preliminary analysis may still be helpful",
-            "response_generation": "The analysis was completed - consult a healthcare professional for interpretation"
-        }
-        
-        return suggestions.get(failed_step, "Please try again or start a new conversation")
-
-    # Utility methods from original implementation
-    async def _gather_evidence(self, plan: Dict, query: str, user_context: str, rag_context: str) -> Dict[str, Any]:
-        """Gather evidence from required tools (implementation unchanged)"""
-        # ... existing implementation from original code
-        evidence = {
-            "query": query,
-            "user_context": user_context,
-            "knowledge_base": rag_context
-        }
-        
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            tasks = []
-            
-            for tool in plan.get("required_tools", []):
-                if tool == "knowledge_base_lookup":
-                    evidence["knowledge_base"] = rag_context
-                elif tool == "ecg_analysis":
-                    evidence["ecg_note"] = "ECG analysis requested but no ECG data provided"
-                elif tool == "vqa_analysis":
-                    evidence["vqa_note"] = "Medical image analysis requested but no image provided"
-                elif tool == "wellness_analysis":
-                    task = self._call_wellness_tool(client, query, user_context)
-                    tasks.append(("wellness_analysis", task))
-            
-            # Execute tool calls
-            if tasks:
-                results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-                
-                for i, (tool_name, _) in enumerate(tasks):
-                    result = results[i]
-                    if not isinstance(result, Exception):
-                        evidence[tool_name] = result
+        finally:
+            # === GUARANTEED SESSION LOGGING ===
+            # This block ALWAYS executes regardless of success or failure
+            if council_result:  # Only log if we have some result
+                try:
+                    success = await self.pm.log_council_session(
+                        session_id=session_id,
+                        user_id=user_id,
+                        original_query=query,
+                        council_result=council_result
+                    )
+                    
+                    if success:
+                        print(f"📊 Session {session_id} logged successfully to Firestore")
                     else:
-                        evidence[f"{tool_name}_error"] = str(result)
+                        print(f"⚠️ Failed to log session {session_id} to Firestore")
+                        
+                except Exception as log_error:
+                    print(f"🚨 Critical: Session logging failed for {session_id}: {log_error}")
+                    # Note: We don't re-raise here to avoid masking the original error
+            else:
+                print(f"⚠️ No council result to log for session {session_id}")
         
-        return evidence
+        return council_result
+    
 
-    async def _call_wellness_tool(self, client: httpx.AsyncClient, query: str, context: str) -> Dict:
-        """Call wellness analysis tool (implementation unchanged)"""
+    def _extract_user_id_from_context(self, user_context: str) -> Optional[str]:
+        """Extract user ID from context string - improved extraction"""
+        if not user_context:
+            return None
+            
         try:
-            response = await client.post(
-                self.available_tools["wellness_analysis"],
-                json={"message": f"Medical wellness analysis for: {query}. Patient context: {context}"}
-            )
-            response.raise_for_status()
-            return response.json()
+            # Method 1: Look for user_id in the context string
+            if "user_id:" in user_context.lower():
+                lines = user_context.split('\n')
+                for line in lines:
+                    if "user_id:" in line.lower():
+                        return line.split(':')[1].strip()
+            
+            # Method 2: Extract from "User: user123" format
+            if "User:" in user_context:
+                lines = user_context.split('\n')
+                for line in lines:
+                    if line.strip().startswith('User:'):
+                        return line.split(':')[1].strip()
+            
+            # Method 3: Look for any user identifier patterns
+            import re
+            user_patterns = [
+                r'user_id[:\s]+([^\s\n]+)',
+                r'User[:\s]+([^\s\n]+)',
+                r'user[:\s]+([^\s\n]+)'
+            ]
+            
+            for pattern in user_patterns:
+                match = re.search(pattern, user_context, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+                    
         except Exception as e:
-            return {"error": str(e), "tool": "wellness_analysis"}
-
-    async def _run_independent_analysis(self, query: str, evidence: Dict, user_context: str) -> Dict[str, Any]:
-        """Run parallel expert analysis (implementation unchanged)"""
-        evidence_summary = self._format_evidence_for_experts(evidence)
+            print(f"Error extracting user_id: {e}")
         
-        tasks = [
-            self._medgemma_analysis(query, evidence_summary, user_context),
-            self._gemini_complex_reasoning(query, evidence_summary, user_context)
-        ]
-        
-        analyses = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        return {
-            "medgemma_physician": analyses[0] if not isinstance(analyses[0], Exception) else f"Error: {analyses[0]}",
-            "gemini_reasoner": analyses[1] if not isinstance(analyses[1], Exception) else f"Error: {analyses[1]}"
-        }
-
-    def _format_evidence_for_experts(self, evidence: Dict) -> str:
-        """Format evidence for expert analysis (implementation unchanged)"""
-        formatted = "=== CLINICAL EVIDENCE ===\n\n"
-        
-        for key, value in evidence.items():
-            if key in ["query", "user_context"]:
-                continue
-            formatted += f"{key.upper()}:\n{str(value)[:300]}...\n\n"
-        
-        return formatted
-
-    async def _medgemma_analysis(self, query: str, evidence: str, context: str) -> str:
-        """MedGemma analysis (implementation unchanged)"""
+        return None
+    
+    async def _system_health_check(self) -> bool:
+        """Check if all required services are operational"""
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                prompt = f"""
-You are an experienced physician with comprehensive medical training. Provide a thorough medical analysis.
+            # Check AI server availability
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                ai_server_response = await client.get("http://ai_server:9000/health")
+                if ai_server_response.status_code != 200:
+                    print("❌ AI server health check failed")
+                    return False
+            
+            # Check Gemini clients
+            if not self.gemini_enabled:
+                print("❌ Gemini clients not available")
+                return False
+            
+            print("✅ System health check passed")
+            return True
+            
+        except Exception as e:
+            print(f"❌ System health check failed: {e}")
+            return False
+    
+    async def _coordinator_planning(self, query: str, user_context: str, rag_context: str) -> str:
+        """Step 1: Strategic analysis and planning by coordinator"""
+        
+        planning_prompt = f"""You are the Lead Medical Coordinator for AURA's Expert Council. Your role is to provide strategic analysis and guide the consultation process.
 
 PATIENT QUERY: {query}
-PATIENT CONTEXT: {context}
+USER CONTEXT: {user_context}
+MEDICAL KNOWLEDGE: {rag_context[:800]}
 
-{evidence}
+TASK: Provide a comprehensive strategic analysis that will guide our expert consultation. Include:
 
-Please provide:
-1. Clinical assessment
-2. Preliminary diagnosis/differential diagnoses  
-3. Recommended next steps
-4. Risk factors and warnings
+1. **Clinical Priority Assessment**: Urgency level and key concerns
+2. **Consultation Strategy**: Which medical specialties should be involved
+3. **Evidence Requirements**: What types of evidence to prioritize
+4. **Risk Factors**: Potential complications or red flags to monitor
+5. **Initial Hypothesis**: Preliminary diagnostic considerations
 
-Respond as a medical professional would to a colleague.
-"""
-                
-                response = await client.post(
-                    "http://ai_server:9000/ai/wellness",
-                    json={"message": prompt}
-                )
-                response.raise_for_status()
-                return response.json().get("response", "MedGemma analysis unavailable")
-                
-        except Exception as e:
-            return f"MedGemma consultation failed: {str(e)}"
-
-    async def _gemini_complex_reasoning(self, query: str, evidence: str, context: str) -> str:
-        """Gemini complex reasoning (implementation unchanged)"""
-        reasoning_prompt = f"""
-You are a medical reasoning specialist focused on complex pattern recognition and differential diagnosis.
-
-PATIENT CASE: {query}
-PATIENT BACKGROUND: {context}
-
-{evidence}
-
-Analyze this case focusing on:
-1. Hidden connections and patterns in the evidence
-2. Multiple differential diagnoses with likelihood assessment
-3. Potential complications or overlooked risk factors
-4. Logical inconsistencies or gaps in information
-5. Evidence-based reasoning for each conclusion
-
-Provide systematic, analytical reasoning like a medical detective.
-"""
+Respond with a clear, structured analysis that our expert team can build upon."""
 
         try:
-            response = await asyncio.to_thread(
-                self.complex_reasoner_model.generate_content, reasoning_prompt
-            )
+            response = self.coordinator_client.generate_content(planning_prompt)
             return response.text
         except Exception as e:
-            return f"Complex reasoning analysis failed: {str(e)}"
+            raise ExpertCouncilError(f"Coordinator planning failed: {str(e)}", "coordinator_planning")
+    
+    async def _gather_medical_evidence(self, query: str, user_context: str, rag_context: str) -> Dict[str, Any]:
+        """Step 2: Gather evidence from specialist tools and knowledge base"""
+        
+        evidence = {
+            "sources": [],
+            "specialist_insights": {},
+            "knowledge_base_results": rag_context
+        }
+        
+        try:
+            # Get MedGemma analysis
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                medgemma_response = await client.post(
+                    "http://ai_server:9000/ai/wellness",
+                    json={"message": f"As a medical specialist, analyze this case: {query}. Provide clinical insights."}
+                )
+                
+                if medgemma_response.status_code == 200:
+                    medgemma_data = medgemma_response.json()
+                    evidence["specialist_insights"]["medical_expert"] = medgemma_data.get("response", "")
+                    evidence["sources"].append("MedGemma Medical Analysis")
+            
+            # Add RAG context as evidence source
+            if rag_context:
+                evidence["sources"].append("Medical Knowledge Base")
+            
+            return evidence
+            
+        except Exception as e:
+            raise ExpertCouncilError(f"Evidence gathering failed: {str(e)}", "evidence_gathering")
+    
+    async def _complex_reasoning(self, query: str, coordinator_analysis: str, medical_evidence: Dict) -> str:
+        """Step 3: Advanced diagnostic reasoning"""
+        
+        reasoning_prompt = f"""You are an Advanced Medical Reasoning Specialist with expertise in complex diagnostic analysis.
 
-    def _sanitize_evidence(self, evidence: Dict) -> Dict:
-        """Sanitize evidence for reasoning trace (implementation unchanged)"""
-        sanitized = {}
-        for key, value in evidence.items():
-            if isinstance(value, str) and len(value) > 200:
-                sanitized[key] = value[:200] + "..."
-            else:
-                sanitized[key] = value
-        return sanitized
+CASE PRESENTATION: {query}
 
-# Initialize singleton
+COORDINATOR'S STRATEGIC ANALYSIS:
+{coordinator_analysis}
+
+MEDICAL EVIDENCE GATHERED:
+{json.dumps(medical_evidence, indent=2)}
+
+TASK: Perform advanced diagnostic reasoning. Analyze:
+
+1. **Differential Diagnosis**: Multiple possible conditions with probability weighting
+2. **Pattern Recognition**: Clinical patterns and their significance  
+3. **Risk Stratification**: Categorize risks from low to high priority
+4. **Diagnostic Confidence**: Level of certainty for each consideration
+5. **Recommended Actions**: Next steps for diagnosis/management
+
+Provide sophisticated medical reasoning that integrates all available evidence."""
+
+        try:
+            response = self.reasoner_client.generate_content(reasoning_prompt)
+            return response.text
+        except Exception as e:
+            raise ExpertCouncilError(f"Complex reasoning failed: {str(e)}", "complex_reasoning")
+    
+    async def _safety_critique(self, query: str, complex_analysis: str, medical_evidence: Dict) -> str:
+        """Step 4: Safety review and critique"""
+        
+        safety_prompt = f"""You are the Chief Medical Safety Officer reviewing this Expert Council consultation.
+
+ORIGINAL CASE: {query}
+
+COMPLEX REASONING ANALYSIS:
+{complex_analysis}
+
+AVAILABLE EVIDENCE:
+{json.dumps(medical_evidence, indent=2)}
+
+CRITICAL SAFETY REVIEW: Evaluate this analysis for:
+
+1. **Safety Concerns**: Any missed red flags or emergency indicators
+2. **Risk Assessment**: Adequacy of risk evaluation
+3. **Clinical Blind Spots**: Potential oversights in the analysis
+4. **Recommendation Safety**: Are suggested actions appropriate and safe?
+5. **Patient Safety Priorities**: Most critical safety considerations
+
+Your job is to ensure patient safety above all else. Challenge any assumptions and highlight any concerns."""
+
+        try:
+            response = self.critic_client.generate_content(safety_prompt)
+            return response.text
+        except Exception as e:
+            raise ExpertCouncilError(f"Safety critique failed: {str(e)}", "safety_critique")
+    
+    async def _consensus_synthesis(self, query: str, coordinator_analysis: str, 
+                                 complex_analysis: str, safety_critique: str, 
+                                 medical_evidence: Dict) -> Dict[str, Any]:
+        """Step 5: Synthesize expert opinions into consensus"""
+        
+        synthesis_prompt = f"""You are the Expert Council Synthesizer. Integrate all expert opinions into a unified assessment.
+
+CASE: {query}
+
+EXPERT OPINIONS:
+1. COORDINATOR: {coordinator_analysis}
+2. COMPLEX REASONER: {complex_analysis}  
+3. SAFETY CRITIC: {safety_critique}
+
+EVIDENCE: {json.dumps(medical_evidence, indent=2)}
+
+SYNTHESIS TASK: Create a unified expert consensus addressing:
+
+1. **Primary Assessment**: Most likely explanation/diagnosis
+2. **Confidence Level**: Team confidence (0.0-1.0) with justification
+3. **Key Recommendations**: Prioritized action items
+4. **Safety Priorities**: Critical safety considerations
+5. **Follow-up Needs**: What additional evaluation may be needed
+
+Respond ONLY with a JSON object in this exact format:
+{{
+    "primary_assessment": "string",
+    "confidence_level": 0.85,
+    "key_recommendations": ["item1", "item2", "item3"],
+    "safety_priorities": ["priority1", "priority2"],
+    "follow_up_needs": ["need1", "need2"],
+    "consensus_reasoning": "explanation of how we reached this consensus"
+}}"""
+
+        try:
+            response = self.coordinator_client.generate_content(synthesis_prompt)
+            
+            # Parse JSON response
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text.split('```json')[1].split('```')[0].strip()
+            elif response_text.startswith('```'):
+                response_text = response_text.split('```')[1].split('```')[0].strip()
+            
+            return json.loads(response_text)
+            
+        except Exception as e:
+            raise ExpertCouncilError(f"Consensus synthesis failed: {str(e)}", "consensus_synthesis")
+    
+    async def _generate_structured_output(self, consensus_result: Dict, medical_evidence: Dict) -> Dict[str, Any]:
+        """Step 6: Generate structured analysis and interactive components"""
+        
+        return {
+            "structured_analysis": {
+                "clinical_summary": {
+                    "primary_assessment": consensus_result.get("primary_assessment", "Assessment pending"),
+                    "key_findings": consensus_result.get("key_recommendations", []),
+                    "safety_considerations": consensus_result.get("safety_priorities", [])
+                },
+                "differential_diagnoses": [
+                    {
+                        "condition": consensus_result.get("primary_assessment", "Primary consideration"),
+                        "probability": "High",
+                        "reasoning": consensus_result.get("consensus_reasoning", "Based on expert analysis")
+                    }
+                ],
+                "recommendations": {
+                    "immediate_actions": consensus_result.get("key_recommendations", [])[:3],
+                    "follow_up_care": consensus_result.get("follow_up_needs", []),
+                    "monitoring": ["Monitor symptoms", "Follow up with healthcare provider"]
+                },
+                "safety_considerations": {
+                    "red_flags": consensus_result.get("safety_priorities", []),
+                    "when_to_seek_help": ["If symptoms worsen", "If new symptoms develop"]
+                }
+            },
+            "interactive_components": {
+                "summary_card": {
+                    "title": "Expert Council Assessment",
+                    "confidence": consensus_result.get("confidence_level", 0.7),
+                    "primary_finding": consensus_result.get("primary_assessment", "Assessment complete")
+                },
+                "diagnoses_panel": {
+                    "primary_consideration": consensus_result.get("primary_assessment", ""),
+                    "confidence_score": consensus_result.get("confidence_level", 0.7)
+                },
+                "action_checklist": {
+                    "items": consensus_result.get("key_recommendations", [])
+                },
+                "safety_alerts": {
+                    "priority_items": consensus_result.get("safety_priorities", [])
+                }
+            },
+            "confidence_assessment": {
+                "overall_confidence": consensus_result.get("confidence_level", 0.7),
+                "confidence_factors": [
+                    "Multiple expert review",
+                    "Evidence-based analysis", 
+                    "Safety validation"
+                ]
+            }
+        }
+    
+    async def _format_user_response(self, consensus_result: Dict, structured_output: Dict) -> str:
+        """Step 7: Format final user response"""
+        
+        confidence = consensus_result.get("confidence_level", 0.7)
+        assessment = consensus_result.get("primary_assessment", "Assessment completed")
+        recommendations = consensus_result.get("key_recommendations", [])
+        
+        response = f"""**Expert Council Assessment**
+
+Our medical expert team has carefully analyzed your situation. Here's our assessment:
+
+**Primary Finding:** {assessment}
+
+**Key Recommendations:**"""
+        
+        for i, rec in enumerate(recommendations[:3], 1):
+            response += f"\n{i}. {rec}"
+        
+        response += f"""
+
+**Confidence Level:** {confidence:.0%} - This assessment is based on collaborative analysis by multiple medical AI specialists.
+
+**Important:** This analysis is for informational purposes and should complement, not replace, professional medical consultation."""
+
+        return response
+    
+    def _get_error_suggestion(self, error_type: str) -> str:
+        """Get helpful suggestion based on error type"""
+        suggestions = {
+            "system_unavailable": "Please try again in a few moments. If the issue persists, start with basic consultation.",
+            "coordinator_planning": "Please rephrase your question and try again.",
+            "evidence_gathering": "Try simplifying your question or check your internet connection.",
+            "complex_reasoning": "The system is experiencing high demand. Please try again shortly.",
+            "safety_critique": "Please try again or contact support if the issue persists.",
+            "consensus_synthesis": "Please try again with a more specific question.",
+            "structured_output": "Please try again or use the basic consultation option.",
+            "user_response": "Please try again or contact support."
+        }
+        return suggestions.get(error_type, "Please try again or contact support if the issue persists.")
+    
+    def _generate_error_response(self, error: ExpertCouncilError) -> str:
+        """Generate user-friendly error response"""
+        if error.error_type == "system_unavailable":
+            return "I'm experiencing some technical difficulties with our expert consultation system. Please try starting with a basic consultation, or try again in a few moments."
+        else:
+            return "I apologize, but I encountered an issue during the expert consultation. Please try rephrasing your question or starting with our basic consultation option."
+
+# Global instance
 expert_council = ExpertCouncil()
