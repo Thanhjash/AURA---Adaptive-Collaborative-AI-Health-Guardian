@@ -1,9 +1,10 @@
 # services/aura_main/main.py
 """
-AURA Main Orchestrator Service - REFACTORED FOR STREAMING with Vercel AI SDK
-- Implements "Narrative Stream" architecture with custom events.
-- Retains non-streaming endpoint for internal testing.
-- Centralized, reusable logic for both streaming and non-streaming modes.
+AURA Main Orchestrator Service - REFACTORED
+- Consistent session management across all flows
+- Centralized error handling with detailed logging
+- Eliminated code duplication
+- Enhanced debugging capabilities
 """
 import os
 import traceback
@@ -12,12 +13,9 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse 
 from pydantic import BaseModel
 import uvicorn
 import httpx
-import json
-import asyncio 
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 from lib.rag_manager import RAGManager
@@ -31,8 +29,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 app = FastAPI(
     title="AURA Main Orchestrator",
-    description="LLM-Driven Health Platform with Expert Council Observability and Streaming",
-    version="6.0.0-stream"
+    description="LLM-Driven Health Platform with Expert Council Observability",
+    version="5.1.0"
 )
 
 app.add_middleware(
@@ -610,103 +608,6 @@ async def _handle_direct_expert_council(query: HealthQuery, triage_result: Optio
     
     return response
 
-# ==================== STREAMING IMPLEMENTATION (THE CORE NEW LOGIC) ====================
-async def run_expert_council_stream(query: HealthQuery, user_context: str, rag_context: str):
-    try:
-        enhanced_user_context = f"user_id: {query.user_id}\n{user_context}"
-        
-        async for update in expert_council.run_expert_council_with_progress(
-            query=query.query,
-            user_context=enhanced_user_context,
-            rag_context=rag_context
-        ):
-            if update["type"] == "progress":
-                yield f"event: council_step\ndata: {json.dumps({'step': update['step'], 'status': update['status'], 'description': update['description']})}\n\n"
-            
-            elif update["type"] == "result":
-                council_result = update["data"]
-                
-                if council_result.get("success"):
-                    # Stream response text
-                    response_text = council_result.get("user_response", "")
-                    for char in response_text:
-                        yield f"event: text_token\ndata: {json.dumps({'token': char})}\n\n"
-                        await asyncio.sleep(0.01)
-                    
-                    # Send structured data
-                    structured_data = {
-                        'structured_analysis': council_result.get('structured_analysis', {}),
-                        'interactive_components': council_result.get('interactive_components', {}),
-                        'reasoning_trace': council_result.get('reasoning_trace', {}),
-                        'confidence': council_result.get('confidence', 0.7)
-                    }
-                    yield f"event: council_complete\ndata: {json.dumps(structured_data)}\n\n"
-                else:
-                    # Handle error
-                    error_message = council_result.get("user_response", "Expert Council failed")
-                    for char in error_message:
-                        yield f"event: text_token\ndata: {json.dumps({'token': char})}\n\n"
-                        await asyncio.sleep(0.01)
-    
-    except Exception as e:
-        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-
-async def stream_aura_response(query: HealthQuery):
-    """
-    HÀM GENERATOR CHÍNH CHO STREAMING (PHIÊN BẢN TỐI ƯU NHẤT)
-    Điều phối toàn bộ logic và `yield` các gói tin JSON với các events chi tiết.
-    """
-    session_id = None
-    try:
-        # --- Giai đoạn 1: Khởi tạo & Phân tích ---
-        yield f"event: task_started\ndata: {json.dumps({'message': 'Request received, starting analysis...'})}\n\n"
-        
-        user_context = await personalization_manager.get_user_context(query.user_id)
-        session_id = await _get_or_create_session(query, user_context)
-        query.session_id = session_id
-        yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'Secure session established.'})}\n\n"
-        
-        yield f"event: analysis_start\ndata: {json.dumps({'message': 'Performing semantic triage...'})}\n\n"
-        triage_result = await _intelligent_semantic_triage(query.query, user_context)
-        routing_decision = _determine_intelligent_routing(triage_result, query.session_id)
-        yield f"event: analysis_complete\ndata: {json.dumps({'category': triage_result['category'], 'routing': routing_decision['strategy']})}\n\n"
-        
-        rag_context = ""
-        if triage_result['category'] not in ['simple_chitchat']:
-            yield f"event: knowledge_search\ndata: {json.dumps({'message': 'Searching medical knowledge base...'})}\n\n"
-            rag_context = await rag_manager.get_context_for_query(query.query)
-
-        # --- Giai đoạn 2: Định tuyến đến luồng xử lý phù hợp ---
-        strategy = routing_decision['strategy']
-
-        if strategy in ['emergency_with_expert_analysis', 'direct_expert_council']:
-            async for chunk in run_expert_council_stream(query, user_context, rag_context):
-                yield chunk
-        
-        elif strategy == 'simple_response':
-            response_data = await _handle_simple_response(query, user_context, triage_result)
-            response_text = response_data.get("response", "Hello! How can I help you today?")
-            for word in response_text.split():
-                yield f"event: text_token\ndata: {json.dumps({'token': word + ' '})}\n\n"
-                await asyncio.sleep(0.04)
-
-        else: # Progressive consultation
-            consultation_result = await _handle_progressive_consultation(query, user_context, rag_context, triage_result)
-            response_text = consultation_result.get("response", "Thank you for your question. Let me look into that for you.")
-            for word in response_text.split():
-                yield f"event: text_token\ndata: {json.dumps({'token': word + ' '})}\n\n"
-                await asyncio.sleep(0.05)
-    
-    except Exception as e:
-        print(f"❌ STREAMING ERROR: {e}\n{traceback.format_exc()}")
-        error_info = {"error": "An unexpected error occurred during the stream.", "detail": str(e)}
-        yield f"event: error\ndata: {json.dumps(error_info)}\n\n"
-
-    finally:
-        # Gói tin cuối cùng: Luôn luôn gửi để báo hiệu kết thúc
-        final_data = {'message': 'Stream finished.', 'session_id': session_id}
-        yield f"event: stream_end\ndata: {json.dumps(final_data)}\n\n"
-
 # ==================== UTILITY FUNCTIONS ====================
 
 def _emergency_conservative_fallback(query: str) -> Dict[str, Any]:
@@ -816,71 +717,6 @@ async def _test_triage_health() -> Dict[str, Any]:
             }
     except Exception as e:
         return {"status": "unavailable", "error": str(e)}
-
-# ==================== NEW/UPDATED ENDPOINTS ====================
-
-# Thay thế endpoint của bạn bằng cái này
-@app.post("/api/chat-stream")
-async def chat_stream_endpoint(query: HealthQuery):
-    """
-    ENDPOINT STREAMING MỚI cho Vercel AI SDK với các headers tối ưu.
-    """
-    headers = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
-    }
-    return StreamingResponse(stream_aura_response(query), media_type="text/event-stream", headers=headers)
-
-async def handle_non_stream_chat(query: HealthQuery) -> Dict[str, Any]:
-    """
-    Hàm logic chính được tách ra để endpoint non-streaming có thể tái sử dụng.
-    Nó gọi các hàm xử lý cũ của bạn.
-    """
-    profile = await personalization_manager.get_user_profile(query.user_id)
-    if not profile:
-        await personalization_manager.create_user_profile(query.user_id)
-    
-    user_context = await personalization_manager.get_user_context(query.user_id)
-    session_id = await _get_or_create_session(query, user_context)
-    query.session_id = session_id
-    
-    if query.force_expert_council:
-        return await _handle_direct_expert_council(query)
-        
-    triage_result = await _intelligent_semantic_triage(query.query, user_context)
-    rag_context = ""
-    if triage_result['category'] not in ['simple_chitchat']:
-        rag_context = await rag_manager.get_context_for_query(query.query)
-        
-    routing_decision = _determine_intelligent_routing(triage_result, query.session_id)
-    
-    strategy = routing_decision['strategy']
-    response = {}
-    if strategy == 'emergency_with_expert_analysis':
-        response = await _handle_emergency_with_expert_analysis(query, triage_result, user_context, rag_context)
-    elif strategy == 'emergency_guidance':
-        response = await _handle_emergency_guidance(query, triage_result, user_context)
-    elif strategy == 'direct_expert_council':
-        response = await _handle_direct_expert_council(query, triage_result)
-    elif strategy == 'progressive_consultation':
-        response = await _handle_progressive_consultation(query, user_context, rag_context, triage_result)
-    elif strategy == 'simple_response':
-        response = await _handle_simple_response(query, user_context, triage_result)
-    else:
-        response = await _handle_progressive_consultation(query, user_context, rag_context, triage_result)
-        
-    response["session_id"] = session_id
-    # ... (phần code còn lại để thêm metadata vào response)
-    return response
-
-@app.post("/api/chat")
-async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
-    """
-    Endpoint non-streaming cũ, giờ đây gọi một hàm xử lý riêng.
-    Rất hữu ích cho việc debug nội bộ.
-    """
-    return await handle_non_stream_chat(query)
 
 # ==================== EXISTING ENDPOINTS (UNCHANGED) ====================
 

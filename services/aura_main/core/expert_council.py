@@ -305,7 +305,232 @@ class ExpertCouncil:
                 print(f"⚠️ No council result to log for session {session_id}")
         
         return council_result
-    
+        
+    async def run_expert_council_with_progress(
+        self, 
+        query: str, 
+        user_context: str = "", 
+        rag_context: str = ""
+    ):
+        """
+        Expert Council with real-time progress streaming
+        Yields progress updates during execution, then final result
+        """
+        
+        # Generate unique session ID
+        session_id = f"council_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}"
+        start_time = time.time()
+        
+        # Initialize tracking
+        council_result = {}
+        steps_completed = []
+        current_step = "initialization"
+        user_id = self._extract_user_id_from_context(user_context) or "anonymous"
+        
+        try:
+            print(f"🏥 Expert Council Session {session_id} starting...")
+            
+            # === STEP 1: SYSTEM CHECK ===
+            current_step = "system_check"
+            yield {"type": "progress", "step": 1, "status": "System health check...", "description": "Verifying all required services"}
+            
+            system_check_step = ExpertCouncilStep("system_check", "Verify all required services are operational")
+            system_check_step.started_at = datetime.utcnow()
+            
+            if not await self._system_health_check():
+                system_check_step.success = False
+                system_check_step.error = "Critical services unavailable"
+                system_check_step.completed_at = datetime.utcnow()
+                steps_completed.append(system_check_step)
+                
+                raise ExpertCouncilError("System health check failed", "system_check", "system_unavailable")
+            
+            system_check_step.success = True
+            system_check_step.completed_at = datetime.utcnow()
+            system_check_step.duration_seconds = (system_check_step.completed_at - system_check_step.started_at).total_seconds()
+            steps_completed.append(system_check_step)
+            
+            # === STEP 2: COORDINATOR PLANNING ===
+            current_step = "coordinator_planning"
+            yield {"type": "progress", "step": 2, "status": "Coordinator planning...", "description": "Strategic analysis and consultation planning"}
+            
+            planning_step = ExpertCouncilStep("coordinator_planning", "Strategic analysis and expert consultation planning")
+            planning_step.started_at = datetime.utcnow()
+            
+            coordinator_analysis = await self._coordinator_planning(query, user_context, rag_context)
+            
+            planning_step.success = True
+            planning_step.output = coordinator_analysis[:200] + "..." if len(coordinator_analysis) > 200 else coordinator_analysis
+            planning_step.completed_at = datetime.utcnow()
+            planning_step.duration_seconds = (planning_step.completed_at - planning_step.started_at).total_seconds()
+            steps_completed.append(planning_step)
+            
+            # === STEP 3: EVIDENCE GATHERING ===
+            current_step = "evidence_gathering"
+            yield {"type": "progress", "step": 3, "status": "Evidence gathering...", "description": "Collecting medical evidence and specialist insights"}
+            
+            evidence_step = ExpertCouncilStep("evidence_gathering", "Collect medical evidence and specialist insights")
+            evidence_step.started_at = datetime.utcnow()
+            
+            medical_evidence = await self._gather_medical_evidence(query, user_context, rag_context)
+            
+            evidence_step.success = True
+            evidence_step.output = f"Gathered {len(medical_evidence.get('sources', []))} evidence sources"
+            evidence_step.completed_at = datetime.utcnow()
+            evidence_step.duration_seconds = (evidence_step.completed_at - evidence_step.started_at).total_seconds()
+            steps_completed.append(evidence_step)
+            
+            # === STEP 4: COMPLEX REASONING ===
+            current_step = "complex_reasoning"
+            yield {"type": "progress", "step": 4, "status": "Complex reasoning...", "description": "Advanced diagnostic reasoning and pattern analysis"}
+            
+            reasoning_step = ExpertCouncilStep("complex_reasoning", "Advanced diagnostic reasoning and pattern analysis")
+            reasoning_step.started_at = datetime.utcnow()
+            
+            complex_analysis = await self._complex_reasoning(query, coordinator_analysis, medical_evidence)
+            
+            reasoning_step.success = True
+            reasoning_step.output = complex_analysis[:200] + "..." if len(complex_analysis) > 200 else complex_analysis
+            reasoning_step.completed_at = datetime.utcnow()
+            reasoning_step.duration_seconds = (reasoning_step.completed_at - reasoning_step.started_at).total_seconds()
+            steps_completed.append(reasoning_step)
+            
+            # === STEP 5: SAFETY CRITIQUE ===
+            current_step = "safety_critique"
+            yield {"type": "progress", "step": 5, "status": "Safety critique...", "description": "Clinical safety review and risk assessment"}
+            
+            critique_step = ExpertCouncilStep("safety_critique", "Clinical safety review and risk assessment")
+            critique_step.started_at = datetime.utcnow()
+            
+            safety_critique = await self._safety_critique(query, complex_analysis, medical_evidence)
+            
+            critique_step.success = True
+            critique_step.output = safety_critique[:200] + "..." if len(safety_critique) > 200 else safety_critique
+            critique_step.completed_at = datetime.utcnow()
+            critique_step.duration_seconds = (critique_step.completed_at - critique_step.started_at).total_seconds()
+            steps_completed.append(critique_step)
+            
+            # === STEP 6: CONSENSUS SYNTHESIS ===
+            current_step = "consensus_synthesis"
+            yield {"type": "progress", "step": 6, "status": "Consensus synthesis...", "description": "Synthesizing expert opinions into unified assessment"}
+            
+            synthesis_step = ExpertCouncilStep("consensus_synthesis", "Synthesize expert opinions into unified assessment")
+            synthesis_step.started_at = datetime.utcnow()
+            
+            consensus_result = await self._consensus_synthesis(
+                query, coordinator_analysis, complex_analysis, safety_critique, medical_evidence
+            )
+            
+            synthesis_step.success = True
+            synthesis_step.output = "Consensus reached with confidence assessment"
+            synthesis_step.completed_at = datetime.utcnow()
+            synthesis_step.duration_seconds = (synthesis_step.completed_at - synthesis_step.started_at).total_seconds()
+            steps_completed.append(synthesis_step)
+            
+            # === STEP 7: STRUCTURED OUTPUT ===
+            current_step = "structured_output"
+            yield {"type": "progress", "step": 7, "status": "Structured output...", "description": "Generating structured analysis and interactive components"}
+            
+            output_step = ExpertCouncilStep("structured_output", "Generate structured analysis and interactive components")
+            output_step.started_at = datetime.utcnow()
+            
+            structured_output = await self._generate_structured_output(consensus_result, medical_evidence)
+            
+            output_step.success = True
+            output_step.output = "Generated structured analysis with interactive components"
+            output_step.completed_at = datetime.utcnow()
+            output_step.duration_seconds = (output_step.completed_at - output_step.started_at).total_seconds()
+            steps_completed.append(output_step)
+            
+            # === STEP 8: USER RESPONSE ===
+            current_step = "user_response"
+            yield {"type": "progress", "step": 8, "status": "User response formatting...", "description": "Formatting final response for presentation"}
+            
+            response_step = ExpertCouncilStep("user_response", "Format final response for user presentation")
+            response_step.started_at = datetime.utcnow()
+            
+            user_response = await self._format_user_response(consensus_result, structured_output)
+            
+            response_step.success = True
+            response_step.output = "User response formatted successfully"
+            response_step.completed_at = datetime.utcnow()
+            response_step.duration_seconds = (response_step.completed_at - response_step.started_at).total_seconds()
+            steps_completed.append(response_step)
+            
+            # === BUILD FINAL RESULT ===
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            council_result = {
+                "session_id": session_id,
+                "success": True,
+                "user_response": user_response,
+                "confidence": structured_output.get("confidence_assessment", {}).get("overall_confidence", 0.7),
+                "structured_analysis": structured_output.get("structured_analysis", {}),
+                "interactive_components": structured_output.get("interactive_components", {}),
+                "reasoning_trace": {
+                    "coordinator_analysis": coordinator_analysis,
+                    "medical_evidence": medical_evidence,
+                    "complex_analysis": complex_analysis,
+                    "safety_critique": safety_critique,
+                    "consensus_result": consensus_result
+                },
+                "metadata": {
+                    "session_id": session_id,
+                    "experts_consulted": ["coordinator", "medical_expert", "complex_reasoner", "safety_critic"],
+                    "evidence_sources": medical_evidence.get("sources", []),
+                    "workflow": "medagent_pro_structured_v3",
+                    "models_used": ["gemini-2.0-flash-exp", "gemini-2.5-flash-exp", "medgemma-4b"]
+                },
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed}
+            }
+            
+            print(f"✅ Expert Council Session {session_id} completed successfully in {total_duration:.2f}s")
+            
+        except ExpertCouncilError as ece:
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            council_result = {
+                "session_id": session_id,
+                "success": False,
+                "error_type": ece.error_type,
+                "failed_step": ece.step,
+                "error_message": ece.message,
+                "suggestion": self._get_error_suggestion(ece.error_type),
+                "user_response": self._generate_error_response(ece),
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed}
+            }
+            
+        except Exception as e:
+            end_time = time.time()
+            total_duration = end_time - start_time
+            
+            council_result = {
+                "session_id": session_id,
+                "success": False,
+                "error_type": "unexpected_error",
+                "failed_step": current_step,
+                "error_message": f"Unexpected error: {str(e)}",
+                "suggestion": "Please try again. If the problem persists, contact support.",
+                "user_response": "I apologize, but I encountered an unexpected technical issue. Please try your question again.",
+                "duration_seconds": total_duration,
+                "step_breakdown": {step.step_name: step.duration_seconds for step in steps_completed}
+            }
+        
+        finally:
+            # Log session
+            if council_result:
+                try:
+                    await self.pm.log_council_session(session_id, user_id, query, council_result)
+                    print(f"📊 Session {session_id} logged successfully")
+                except Exception as log_error:
+                    print(f"🚨 Session logging failed: {log_error}")
+        
+        # Yield final result
+        yield {"type": "result", "data": council_result}
 
     def _extract_user_id_from_context(self, user_context: str) -> Optional[str]:
         """Extract user ID from context string - improved extraction"""
