@@ -287,68 +287,6 @@ Extract medical information and return the corrected JSON object:"""
         # Default to assessment if state unclear
         return await self._handle_assessment_phase(session_id, user_message, user_context, rag_context)
 
-    async def _assess_escalation_robust(self, session_data: Dict, user_context: str, rag_context: str) -> Dict[str, Any]:
-        """Robust LLM-driven escalation assessment"""
-        symptom_profile = session_data.get("symptom_profile", {})
-        messages = session_data.get("messages", [])
-        conversation_history = self._format_conversation_history(messages)
-        
-        assessment_prompt = f"""You are a medical triage specialist. Assess if this conversation requires Expert Council escalation.
-
-PATIENT PROFILE: {user_context}
-
-MEDICAL KNOWLEDGE: {rag_context[:500]}
-
-CONVERSATION SUMMARY:
-{conversation_history}
-
-EXTRACTED SYMPTOMS:
-{json.dumps(symptom_profile, indent=2)}
-
-CONVERSATION STATS:
-- Total messages: {len(messages)}
-- Extraction failures: {session_data.get('extraction_failures', 0)}
-- Communication errors: {session_data.get('communication_errors', 0)}
-
-ASSESSMENT TASK: Should this case be escalated to our Expert Council for comprehensive analysis?
-
-CRITICAL: Return ONLY this JSON object:
-{{
-    "should_escalate": true/false,
-    "confidence": 0.0-1.0,
-    "primary_reason": "brief explanation",
-    "urgency_level": "low/medium/high"
-}}"""
-
-        try:
-            if not await self._ensure_ai_server_ready():
-                # Conservative fallback: escalate on long conversations
-                return {
-                    "should_escalate": len(messages) >= 8,
-                    "confidence": 0.5,
-                    "primary_reason": "AI server not ready - defaulting to message count",
-                    "urgency_level": "medium"
-                }
-
-            response_data = await self._call_ai_server_robust("/ai/wellness", {"message": assessment_prompt})
-            response_text = response_data.get("response", "")
-
-            decision = parse_llm_json_response(response_text)
-            if decision:
-                print(f"🎯 LLM escalation decision: {decision.get('should_escalate')} ({decision.get('primary_reason', 'No reason')})")
-                return decision
-
-        except Exception as e:
-            print(f"❌ Escalation assessment failed: {e}")
-        
-        # Conservative fallback: escalate on long conversations
-        return {
-            "should_escalate": len(messages) >= 8,
-            "confidence": 0.5,
-            "primary_reason": "Assessment failed - defaulting to message count",
-            "urgency_level": "medium"
-        }
-
     async def _handle_progressive_consultation(self, session_id: str, user_message: str,
                                              user_context: str, rag_context: str) -> Dict[str, Any]:
         """Handle progressive consultation with robust communication"""
@@ -406,43 +344,149 @@ CRITICAL: Return ONLY this JSON object:
         }
 
     def _build_progressive_prompt(self, session_data: Dict, user_context: str, rag_context: str) -> str:
-        """Build context-aware prompt for progressive consultation"""
-        messages = session_data.get("messages", [])
-        symptom_profile = session_data.get("symptom_profile", {})
-        conversation_history = self._format_conversation_history(messages[-6:])  # Last 6 messages
-        
-        return f"""You are AURA's medical consultation specialist. Guide this conversation efficiently toward complete understanding.
+            """Build context-aware prompt for progressive consultation - FIXED MEMORY"""
+            messages = session_data.get("messages", [])
+            symptom_profile = session_data.get("symptom_profile", {})
+            
+            # BUILD CONVERSATION SUMMARY - KEY FIX
+            conversation_summary = ""
+            user_responses = []
+            aura_questions = []
+            
+            for msg in messages:
+                if msg.get("role") == "user":
+                    user_responses.append(msg.get("content", ""))
+                elif msg.get("role") == "assistant":
+                    aura_questions.append(msg.get("content", ""))
+            
+            # Create detailed conversation context
+            if user_responses:
+                conversation_summary = f"""
+    CONVERSATION HISTORY:
+    User has said: {' | '.join(user_responses)}
+    Previous AURA responses: {' | '.join(aura_questions[-2:] if len(aura_questions) > 2 else aura_questions)}
 
-PATIENT PROFILE:
-{user_context}
+    EXTRACTED SYMPTOM PROFILE:
+    {json.dumps(symptom_profile, indent=2)}
 
-RELEVANT MEDICAL KNOWLEDGE:
-{rag_context[:600]}
+    CONVERSATION STATS: {len(messages)} messages exchanged
+    """
+            
+            return f"""You are AURA's medical consultation specialist. Continue this conversation intelligently.
 
-CONVERSATION HISTORY:
-{conversation_history}
+    PATIENT PROFILE:
+    {user_context}
 
-CURRENT SYMPTOM UNDERSTANDING:
-{json.dumps(symptom_profile, indent=2)}
+    RELEVANT MEDICAL KNOWLEDGE:
+    {rag_context[:600]}
 
-CONVERSATION STATS: {len(messages)} messages, {session_data.get('extraction_failures', 0)} extraction failures
+    {conversation_summary}
 
-TASK: Ask ONE focused, intelligent question to progress this consultation.
+    CURRENT SESSION CONTEXT:
+    - Total interactions: {len(messages)}
+    - Symptom data collected: {len([v for v in symptom_profile.values() if v not in [None, [], ""]])} fields
 
-CRITICAL INSTRUCTIONS:
-1. Respond directly as AURA - do NOT generate example conversations
-2. Do NOT include "Patient:" or dialogue examples in your response
-3. Ask only ONE clear question 
-4. Be empathetic and professional
-5. Do not include any code blocks or JSON in your response
+    CRITICAL INSTRUCTIONS:
+    1. NEVER repeat questions already answered by the patient
+    2. If pain scale provided (e.g., "5 on scale"), acknowledge it specifically  
+    3. If duration mentioned (e.g., "every day for a week"), acknowledge it specifically
+    4. If sufficient symptoms gathered (3+ key details), recommend expert consultation
+    5. Build on previous conversation - don't start over
+    6. Be empathetic about their concerns
 
-GUIDELINES:
-- Don't repeat questions already answered
-- Focus on the most important missing information
-- If sufficient information gathered, acknowledge and indicate readiness for analysis
-- Prioritize: onset timing → severity → associated symptoms → character/triggers
+    GUIDELINES:
+    - Review what patient has already shared before asking new questions
+    - Focus on the most important missing information only
+    - If patient seems frustrated about repeating info, apologize and escalate to expert consultation
+    - Don't ask for basic symptoms already provided (headache, duration, severity)
 
-Respond with ONE question or acknowledgment only."""
+    Respond with ONE appropriate question or acknowledgment that builds on the conversation."""
+
+    async def _assess_escalation_robust(self, session_data: Dict, user_context: str, rag_context: str) -> Dict[str, Any]:
+            """Robust LLM-driven escalation assessment - IMPROVED LOGIC"""
+            symptom_profile = session_data.get("symptom_profile", {})
+            messages = session_data.get("messages", [])
+            conversation_history = self._format_conversation_history(messages)
+            
+            # Count meaningful symptom data
+            meaningful_data = len([v for v in symptom_profile.values() if v not in [None, [], ""]])
+            
+            assessment_prompt = f"""You are a medical triage specialist. Assess if this conversation should escalate to Expert Council.
+
+    PATIENT PROFILE: {user_context}
+
+    MEDICAL KNOWLEDGE: {rag_context[:500]}
+
+    FULL CONVERSATION:
+    {conversation_history}
+
+    EXTRACTED SYMPTOMS DATA:
+    {json.dumps(symptom_profile, indent=2)}
+
+    CONVERSATION ANALYSIS:
+    - Total messages: {len(messages)}
+    - Meaningful symptom data points: {meaningful_data}
+    - Extraction failures: {session_data.get('extraction_failures', 0)}
+
+    ESCALATION CRITERIA:
+    1. Persistent symptoms (>= 3 days duration)
+    2. Pain level >= 5/10 
+    3. Patient mentioned "expert" or "specialist"
+    4. Patient frustrated with repetitive questions
+    5. Sufficient data collected (3+ symptom details)
+    6. Red flag symptoms requiring expert review
+
+    CRITICAL: Return ONLY this JSON object:
+    {{
+        "should_escalate": true/false,
+        "confidence": 0.0-1.0,
+        "primary_reason": "specific reason for decision",
+        "urgency_level": "low/medium/high"
+    }}"""
+
+            try:
+                if not await self._ensure_ai_server_ready():
+                    # IMPROVED FALLBACK LOGIC
+                    should_escalate = (
+                        len(messages) >= 6 or  # Long conversation
+                        meaningful_data >= 3 or  # Enough data
+                        any("expert" in msg.get("content", "").lower() or "specialist" in msg.get("content", "").lower() 
+                            for msg in messages if msg.get("role") == "user") or  # User requested expert
+                        any("forget" in msg.get("content", "").lower() or "repeat" in msg.get("content", "").lower()
+                            for msg in messages if msg.get("role") == "user")  # User frustrated
+                    )
+                    
+                    return {
+                        "should_escalate": should_escalate,
+                        "confidence": 0.7,
+                        "primary_reason": "Smart fallback - sufficient conversation data or user request",
+                        "urgency_level": "medium"
+                    }
+
+                response_data = await self._call_ai_server_robust("/ai/wellness", {"message": assessment_prompt})
+                response_text = response_data.get("response", "")
+
+                decision = parse_llm_json_response(response_text)
+                if decision:
+                    print(f"🎯 LLM escalation decision: {decision.get('should_escalate')} ({decision.get('primary_reason', 'No reason')})")
+                    return decision
+
+            except Exception as e:
+                print(f"❌ Escalation assessment failed: {e}")
+            
+            # Enhanced fallback with better logic
+            should_escalate = (
+                len(messages) >= 6 or
+                meaningful_data >= 3 or
+                any("expert" in msg.get("content", "").lower() for msg in messages if msg.get("role") == "user")
+            )
+            
+            return {
+                "should_escalate": should_escalate,
+                "confidence": 0.6,
+                "primary_reason": "Enhanced fallback - conversation length or data completeness",
+                "urgency_level": "medium"
+            }
 
     async def _handle_expert_council_escalation(self, session_id: str, user_message: str,
                                               user_context: str, rag_context: str) -> Dict[str, Any]:

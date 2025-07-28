@@ -1,15 +1,18 @@
 # services/aura_main/main.py
 """
-AURA Main Orchestrator Service - Enhanced with LLM-Driven Intelligent Routing
-Replaces all fixed keyword matching with semantic AI analysis
-Enhanced with Council Session Observability
-FIXED: Timezone-aware datetime handling
+AURA Main Orchestrator Service - REFACTORED
+- Consistent session management across all flows
+- Centralized error handling with detailed logging
+- Eliminated code duplication
+- Enhanced debugging capabilities
 """
 import os
+import traceback
 from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import httpx
@@ -27,7 +30,15 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 app = FastAPI(
     title="AURA Main Orchestrator",
     description="LLM-Driven Health Platform with Expert Council Observability",
-    version="5.0.0"
+    version="5.1.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # Initialize managers
@@ -51,12 +62,67 @@ class FeedbackRequest(BaseModel):
     interaction_id: str
     feedback: Dict[str, Any]
 
+# ==================== HELPER FUNCTIONS ====================
+
+async def _get_or_create_session(query: HealthQuery, user_context: str) -> str:
+    """
+    REFACTOR: Centralized session management
+    Creates new session if none exists, returns existing session_id otherwise
+    """
+    if query.session_id:
+        print(f"🔄 Using existing session: {query.session_id}")
+        return query.session_id
+    
+    print(f"🆕 Creating new session for user: {query.user_id}")
+    new_session_data = await conversation_manager.start_conversation(
+        user_id=query.user_id,
+        initial_query=query.query,
+        user_context=user_context,
+        rag_context=""  # RAG context added later if needed
+    )
+    
+    session_id = new_session_data.get("session_id")
+    print(f"✅ Session created: {session_id}")
+    return session_id
+
+async def _robust_ai_server_call(endpoint: str, payload: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+    """
+    REFACTOR: Centralized AI server communication with enhanced error handling
+    OPTIMIZED: 30s timeout for MedGemma startup/inference
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            response = await client.post(f"http://ai_server:9000{endpoint}", json=payload)
+            response.raise_for_status()  # Raises HTTPStatusError for 4xx/5xx
+            return response.json()
+            
+    except httpx.HTTPStatusError as http_err:
+        error_detail = f"HTTP {http_err.response.status_code}"
+        try:
+            error_body = http_err.response.text
+            if error_body:
+                error_detail += f": {error_body[:200]}"
+        except:
+            pass
+        print(f"❌ AI Server HTTP Error [{endpoint}]: {error_detail}")
+        raise
+        
+    except httpx.TimeoutException:
+        print(f"⏰ AI Server Timeout [{endpoint}]: {timeout}s exceeded (MedGemma startup/inference)")
+        raise
+        
+    except Exception as e:
+        print(f"❌ AI Server Connection Error [{endpoint}]: {type(e).__name__} - {e}")
+        raise
+
+# ==================== MAIN ENDPOINTS ====================
+
 @app.get("/")
 async def root():
     return {
         "service": "AURA Main Orchestrator",
         "status": "healthy", 
-        "version": "5.0.0",
+        "version": "5.1.0",
         "capabilities": [
             "LLM-Driven Routing", 
             "Progressive Consultation", 
@@ -72,7 +138,8 @@ async def root():
             "adaptive_routing", 
             "semantic_analysis",
             "council_session_logging",
-            "performance_analytics"
+            "performance_analytics",
+            "refactored_session_management"
         ]
     }
 
@@ -89,7 +156,7 @@ async def health_check():
     return {
         "status": "healthy", 
         "service": "aura_main",
-        "version": "5.0.0",
+        "version": "5.1.0",
         "systems": {
             "rag_system": rag_health,
             "personalization_system": personalization_health,
@@ -120,32 +187,13 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-async def _test_triage_health() -> Dict[str, Any]:
-    """Test intelligent triage system health"""
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            test_response = await client.post(
-                "http://ai_server:9000/ai/triage",
-                json={"query": "test health check", "context": ""}
-            )
-            if test_response.status_code == 200:
-                result = test_response.json()
-                return {
-                    "status": "healthy", 
-                    "model": "gemini-2.0-flash-exp",
-                    "llm_driven": result.get("llm_driven", False),
-                    "fallback_available": result.get("fallback", False)
-                }
-            else:
-                return {"status": "degraded", "error": f"HTTP {test_response.status_code}"}
-    except Exception as e:
-        return {"status": "unavailable", "error": str(e)}
-
 @app.post("/api/chat")
 async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
     """
-    Enhanced Chat Endpoint with LLM-Driven Intelligent Routing
-    Replaces all fixed keyword matching with semantic AI analysis
+    REFACTORED: Enhanced Chat Endpoint with consistent session management
+    - Session created/retrieved at the start
+    - All handlers guaranteed to have session_id
+    - Clean separation of concerns
     """
     
     # Get or create user profile for personalization
@@ -153,16 +201,19 @@ async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
     if not profile:
         profile = await personalization_manager.create_user_profile(query.user_id)
     
+    # Get user context for personalization
+    user_context = await personalization_manager.get_user_context(query.user_id)
+    print(f"👤 User context: {len(user_context)} chars")
+    
+    # ===== REFACTOR: CENTRALIZED SESSION MANAGEMENT =====
+    # Ensure session exists BEFORE any processing
+    # This eliminates all session-related bugs in handlers
+    session_id = await _get_or_create_session(query, user_context)
+    query.session_id = session_id  # Update query object for handlers
+    
     # Force Expert Council if explicitly requested
     if query.force_expert_council:
         return await _handle_direct_expert_council(query)
-    
-    # === ALWAYS FETCH CONTEXTS ===
-    print(f"🔍 Fetching contexts for user: {query.user_id}")
-    
-    # Always get user context (personalization)
-    user_context = await personalization_manager.get_user_context(query.user_id)
-    print(f"👤 User context: {len(user_context)} chars")
     
     # === LLM-DRIVEN INTELLIGENT TRIAGE ===
     print(f"🧠 Running semantic analysis for: '{query.query[:50]}...'")
@@ -200,8 +251,13 @@ async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
         query.query,
         response.get("response", "")[:100] + "...",
         response.get("service_used", "intelligent_orchestrator"),
-        response.get("confidence", 0.8)
+        response.get("confidence", 0.8),
+        session_id=session_id
     )
+    
+    # ===== REFACTOR: GUARANTEED SESSION_ID IN RESPONSE =====
+    # Ensure session_id is always in the response for frontend
+    response["session_id"] = session_id
     
     # Enhance response with intelligent routing metadata
     enhanced_response = {
@@ -230,32 +286,252 @@ async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
     
     return enhanced_response
 
+# ==================== HANDLER FUNCTIONS (REFACTORED) ====================
+
 async def _intelligent_semantic_triage(query: str, user_context: str) -> Dict[str, Any]:
     """
-    LLM-driven semantic query analysis
-    Replaces all fixed keyword matching with intelligent semantic understanding
+    REFACTORED: LLM-driven semantic query analysis with enhanced error handling
     """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            triage_response = await client.post(
-                "http://ai_server:9000/ai/triage",
-                json={
-                    "query": query,
-                    "context": user_context[:200]  # Provide user context for better classification
-                }
-            )
-            
-            if triage_response.status_code == 200:
-                result = triage_response.json()
-                print(f"✅ Semantic analysis successful: {result['category']}")
-                return result
-            else:
-                print(f"⚠️ Triage service error: {triage_response.status_code}")
-                return _emergency_conservative_fallback(query)
-                
+        result = await _robust_ai_server_call(
+            "/ai/triage",
+            {"query": query, "context": user_context[:200]}
+        )
+        print(f"✅ Semantic analysis successful: {result['category']}")
+        return result
+        
     except Exception as e:
-        print(f"❌ Semantic analysis failed: {e}")
+        print(f"❌ Semantic analysis failed, using conservative fallback: {type(e).__name__}")
         return _emergency_conservative_fallback(query)
+
+async def _handle_simple_response(query: HealthQuery, user_context: str, triage_result: Dict) -> Dict[str, Any]:
+    """
+    REFACTORED: Handle simple chitchat - session management already handled by main endpoint
+    """
+    # Session guaranteed to exist at this point - no need to create
+    
+    try:
+        response_data = await _robust_ai_server_call(
+            "/ai/wellness",
+            {"message": f"Respond naturally and helpfully to this non-medical query: {query.query}"}
+        )
+        
+        return {
+            "response": response_data.get("response", "Hello! How can I help you today?"),
+            "service_used": "llm_simple_conversation",
+            "confidence": 0.8,
+            "category": "chitchat",
+            "triage_category": triage_result['category'],
+            "llm_analysis": triage_result.get('semantic_analysis', '')
+        }
+        
+    except Exception as e:
+        print(f"❌ Simple response AI call failed: {type(e).__name__} - {e}")
+        # Graceful fallback
+        return {
+            "response": "Hello! I'm AURA, your health companion. How can I help you today?",
+            "service_used": "simple_conversation_fallback",
+            "confidence": 0.6,
+            "category": "chitchat",
+            "triage_category": triage_result['category']
+        }
+
+async def _handle_emergency_guidance(query: HealthQuery, triage_result: Dict, user_context: str) -> Dict[str, Any]:
+    """
+    REFACTORED: Handle emergency situations - session management already handled by main endpoint
+    """
+    # Session guaranteed to exist at this point - no need to create
+    
+    medical_indicators = triage_result.get('medical_indicators', ['Emergency symptoms'])
+    urgency_score = triage_result.get('urgency_score', 0.9)
+    
+    emergency_response = f"""🚨 **URGENT MEDICAL ATTENTION NEEDED**
+
+Based on AI analysis of your description: "{query.query}", this appears to be a medical emergency requiring immediate professional care.
+
+**LLM Analysis Results:**
+• Urgency Score: {urgency_score:.0%}
+• Medical Indicators: {', '.join(medical_indicators)}
+• Confidence: {triage_result['confidence']:.0%}
+
+**IMMEDIATE ACTIONS:**
+• Call emergency services (911) if in the US, or your local emergency number
+• Go to the nearest emergency room immediately
+• Do not drive yourself - call an ambulance or have someone drive you
+• If possible, contact your doctor or healthcare provider
+
+**WHILE WAITING FOR HELP:**
+• Stay calm and try to remain still
+• If you have prescribed emergency medications, follow your doctor's instructions
+• Have someone stay with you if possible
+• Keep your phone nearby
+
+⚠️ **IMPORTANT:** This is an AI assessment based on semantic analysis of your description. Only medical professionals can provide definitive emergency care."""
+
+    return {
+        "response": emergency_response,
+        "service_used": "llm_emergency_guidance_system",
+        "confidence": 0.95,
+        "category": "emergency",
+        "triage_category": triage_result['category'],
+        "urgency_level": "critical",
+        "immediate_action_required": True,
+        "emergency_indicators": medical_indicators,
+        "llm_analysis": {
+            "urgency_score": urgency_score,
+            "confidence": triage_result['confidence'],
+            "reasoning": triage_result['reasoning']
+        }
+    }
+
+async def _handle_progressive_consultation(query: HealthQuery, user_context: str, rag_context: str, triage_result: Dict) -> Dict[str, Any]:
+    """
+    REFACTORED: Handle medical queries through progressive consultation
+    """
+    # Session guaranteed to exist at this point
+    
+    # FIX: Properly await get_session_history before calling .get()
+    try:
+        session_history = await conversation_manager.get_session_history(query.session_id)
+        message_count = len(session_history.get("messages", []))
+        
+        if message_count > 1:
+            print(f"🔄 Continuing conversation: {query.session_id} ({message_count} messages)")
+            response = await conversation_manager.continue_conversation(
+                session_id=query.session_id, 
+                user_message=query.query,
+                user_context=user_context,
+                rag_context=rag_context
+            )
+        else:
+            print(f"🆕 Starting progressive consultation for session: {query.session_id}")
+            # Session already created, use conversation manager for the flow
+            response = await conversation_manager.continue_conversation(
+                session_id=query.session_id,
+                user_message=query.query,
+                user_context=user_context,
+                rag_context=rag_context
+            )
+    except Exception as e:
+        print(f"❌ Session history error, defaulting to continue: {e}")
+        # Fallback: always continue conversation
+        response = await conversation_manager.continue_conversation(
+            session_id=query.session_id,
+            user_message=query.query,
+            user_context=user_context,
+            rag_context=rag_context
+        )
+    
+    # Add LLM analysis metadata
+    response["triage_analysis"] = {
+        "category": triage_result['category'],
+        "confidence": triage_result['confidence'],
+        "reasoning": triage_result['reasoning'],
+        "medical_indicators": triage_result.get('medical_indicators', [])
+    }
+    response["llm_driven_routing"] = True
+    
+    return response
+
+async def _handle_direct_expert_council(query: HealthQuery, triage_result: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    REFACTORED: Enhanced Expert Council - session management already handled by main endpoint
+    """
+    # Session guaranteed to exist at this point - no need to create
+    
+    # Get user context and RAG context
+    user_context = await personalization_manager.get_user_context(query.user_id)
+    rag_context = await rag_manager.get_context_for_query(query.query)
+    
+    # Enhanced user context with explicit user_id
+    enhanced_user_context = f"user_id: {query.user_id}\n{user_context}"
+    
+    # Run Enhanced Expert Council with LLM analysis context
+    council_result = await expert_council.run_expert_council(
+        query=query.query,
+        user_context=enhanced_user_context,
+        rag_context=rag_context
+    )
+    
+    # Handle Expert Council failure
+    if not council_result.get("success"):
+        error_response = {
+            "error": "Expert Council consultation failed",
+            "error_type": council_result.get("error_type", "expert_council_failure"),
+            "failed_step": council_result.get("failed_step", "unknown_step"),
+            "error_message": council_result.get("error_message", "Expert Council encountered an error"),
+            "suggestion": council_result.get("suggestion", "Please try again or start with basic consultation"),
+            "user_response": council_result.get("user_response", "I'm experiencing technical difficulties. Please try again in a moment."),
+            "service_used": "expert_council_error",
+            "confidence": 0.1,
+            "user_id": query.user_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "council_session_id": council_result.get("session_id")
+        }
+        return error_response
+    
+    # Extract structured data from Expert Council
+    confidence = council_result.get("confidence", 0.7)
+    structured_analysis = council_result.get("structured_analysis", {})
+    interactive_components = council_result.get("interactive_components", {})
+    
+    # Create enhanced response
+    final_response = f"""**🏥 AURA Expert Council Analysis**
+
+{council_result['user_response']}
+
+**🤝 Expert Consensus:** {confidence:.0%} confidence
+**👤 Personalized Analysis**
+
+---
+*This analysis was conducted by AURA's Expert Council using MedAgent-Pro methodology with multiple AI specialists.*
+
+⚠️ **Important:** This analysis is for informational purposes. Please consult your healthcare provider for personalized medical advice."""
+    
+    # Log interaction
+    await personalization_manager.log_interaction(
+        query.user_id,
+        query.query,
+        "Expert Council consultation completed",
+        "expert_council_llm_routing",
+        confidence,
+        session_id=query.session_id
+    )
+    
+    # Return enhanced response with LLM analysis context
+    response = {
+        "response": final_response,
+        "structured_analysis": structured_analysis,
+        "interactive_components": interactive_components,
+        "service_used": "expert_council_llm_routing",
+        "confidence": confidence,
+        "query_complexity": "expert_council",
+        "user_id": query.user_id,
+        "knowledge_used": True,
+        "personalized": True,
+        "expert_council_session": {
+            "session_id": council_result.get("session_id"),
+            "experts_consulted": council_result.get("metadata", {}).get("experts_consulted", []),
+            "evidence_sources": council_result.get("metadata", {}).get("evidence_sources", []),
+            "workflow": council_result.get("metadata", {}).get("workflow", "medagent_pro_structured_v3")
+        },
+        "reasoning_trace": council_result.get('reasoning_trace', {}),
+        "flow_type": "llm_driven_expert_council",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    # Add LLM triage context if available
+    if triage_result:
+        response["semantic_analysis"] = {
+            "category": triage_result['category'],
+            "confidence": triage_result['confidence'],
+            "reasoning": triage_result['reasoning'],
+            "medical_indicators": triage_result.get('medical_indicators', [])
+        }
+    
+    return response
+
+# ==================== UTILITY FUNCTIONS ====================
 
 def _emergency_conservative_fallback(query: str) -> Dict[str, Any]:
     """Emergency conservative fallback when all LLM systems unavailable"""
@@ -346,213 +622,24 @@ def _determine_intelligent_routing(triage_result: Dict[str, Any], session_id: Op
         "ai_confidence": confidence
     }
 
-async def _handle_emergency_guidance(query: HealthQuery, triage_result: Dict, user_context: str) -> Dict[str, Any]:
-    """Handle emergency situations with immediate guidance based on LLM analysis"""
-    
-    medical_indicators = triage_result.get('medical_indicators', ['Emergency symptoms'])
-    urgency_score = triage_result.get('urgency_score', 0.9)
-    
-    emergency_response = f"""🚨 **URGENT MEDICAL ATTENTION NEEDED**
-
-Based on AI analysis of your description: "{query.query}", this appears to be a medical emergency requiring immediate professional care.
-
-**LLM Analysis Results:**
-• Urgency Score: {urgency_score:.0%}
-• Medical Indicators: {', '.join(medical_indicators)}
-• Confidence: {triage_result['confidence']:.0%}
-
-**IMMEDIATE ACTIONS:**
-• Call emergency services (911) if in the US, or your local emergency number
-• Go to the nearest emergency room immediately
-• Do not drive yourself - call an ambulance or have someone drive you
-• If possible, contact your doctor or healthcare provider
-
-**WHILE WAITING FOR HELP:**
-• Stay calm and try to remain still
-• If you have prescribed emergency medications, follow your doctor's instructions
-• Have someone stay with you if possible
-• Keep your phone nearby
-
-⚠️ **IMPORTANT:** This is an AI assessment based on semantic analysis of your description. Only medical professionals can provide definitive emergency care."""
-
-    return {
-        "response": emergency_response,
-        "service_used": "llm_emergency_guidance_system",
-        "confidence": 0.95,
-        "category": "emergency",
-        "triage_category": triage_result['category'],
-        "urgency_level": "critical",
-        "immediate_action_required": True,
-        "emergency_indicators": medical_indicators,
-        "llm_analysis": {
-            "urgency_score": urgency_score,
-            "confidence": triage_result['confidence'],
-            "reasoning": triage_result['reasoning']
-        }
-    }
-
-async def _handle_simple_response(query: HealthQuery, user_context: str, triage_result: Dict) -> Dict[str, Any]:
-    """Handle simple chitchat and non-medical queries identified by LLM"""
-    
-    # Use MedGemma for natural conversation response
+async def _test_triage_health() -> Dict[str, Any]:
+    """Test intelligent triage system health"""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            response = await client.post(
-                "http://ai_server:9000/ai/wellness",
-                json={"message": f"Respond naturally and helpfully to this non-medical query: {query.query}"}
-            )
-            
-            if response.status_code == 200:
-                response_data = response.json()
-                return {
-                    "response": response_data.get("response", "Hello! How can I help you today?"),
-                    "service_used": "llm_simple_conversation",
-                    "confidence": 0.8,
-                    "category": "chitchat",
-                    "triage_category": triage_result['category'],
-                    "llm_analysis": triage_result.get('semantic_analysis', '')
-                }
+        result = await _robust_ai_server_call(
+            "/ai/triage",
+            {"query": "test health check", "context": ""}
+        )
+        return {
+            "status": "healthy", 
+            "model": "gemini-2.0-flash-exp",
+            "llm_driven": result.get("llm_driven", False),
+            "fallback_available": result.get("fallback", False)
+        }
     except Exception as e:
-        print(f"Simple response error: {e}")
-    
-    # Intelligent fallback
-    return {
-        "response": "Hello! I'm AURA, your health companion. How can I help you today?",
-        "service_used": "simple_conversation_fallback",
-        "confidence": 0.6,
-        "category": "chitchat",
-        "triage_category": triage_result['category']
-    }
+        return {"status": "unavailable", "error": str(e)}
 
-async def _handle_progressive_consultation(query: HealthQuery, user_context: str, rag_context: str, triage_result: Dict) -> Dict[str, Any]:
-    """Handle medical queries through progressive consultation with LLM insights"""
-    
-    if query.session_id:
-        print(f"🔄 Continuing conversation: {query.session_id}")
-        response = await conversation_manager.continue_conversation(
-            session_id=query.session_id, 
-            user_message=query.query,
-            user_context=user_context,
-            rag_context=rag_context
-        )
-    else:
-        print(f"🆕 Starting new consultation")
-        response = await conversation_manager.start_conversation(
-            user_id=query.user_id, 
-            initial_query=query.query,
-            user_context=user_context,
-            rag_context=rag_context
-        )
-    
-    # Add LLM analysis metadata
-    response["triage_analysis"] = {
-        "category": triage_result['category'],
-        "confidence": triage_result['confidence'],
-        "reasoning": triage_result['reasoning'],
-        "medical_indicators": triage_result.get('medical_indicators', [])
-    }
-    response["llm_driven_routing"] = True
-    
-    return response
+# ==================== EXISTING ENDPOINTS (UNCHANGED) ====================
 
-async def _handle_direct_expert_council(query: HealthQuery, triage_result: Optional[Dict] = None) -> Dict[str, Any]:
-    """
-    Enhanced Expert Council with LLM triage context
-    Note: Session logging is handled automatically in expert_council.py
-    """
-    
-    # Get user context and RAG context
-    user_context = await personalization_manager.get_user_context(query.user_id)
-    rag_context = await rag_manager.get_context_for_query(query.query)
-    
-    # Enhanced user context with explicit user_id
-    enhanced_user_context = f"user_id: {query.user_id}\n{user_context}"
-    
-    # Run Enhanced Expert Council with LLM analysis context
-    council_result = await expert_council.run_expert_council(
-        query=query.query,
-        user_context=enhanced_user_context,
-        rag_context=rag_context
-    )
-    
-    # Handle Expert Council failure
-    if not council_result.get("success"):
-        error_response = {
-            "error": "Expert Council consultation failed",
-            "error_type": council_result.get("error_type", "expert_council_failure"),
-            "failed_step": council_result.get("failed_step", "unknown_step"),
-            "error_message": council_result.get("error_message", "Expert Council encountered an error"),
-            "suggestion": council_result.get("suggestion", "Please try again or start with basic consultation"),
-            "user_response": council_result.get("user_response", "I'm experiencing technical difficulties. Please try again in a moment."),
-            "service_used": "expert_council_error",
-            "confidence": 0.1,
-            "user_id": query.user_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "council_session_id": council_result.get("session_id")
-        }
-        return error_response
-    
-    # Extract structured data from Expert Council
-    confidence = council_result.get("confidence", 0.7)
-    structured_analysis = council_result.get("structured_analysis", {})
-    interactive_components = council_result.get("interactive_components", {})
-    
-    # Create enhanced response
-    final_response = f"""**🏥 AURA Expert Council Analysis**
-
-{council_result['user_response']}
-
-**🤝 Expert Consensus:** {confidence:.0%} confidence
-**👤 Personalized Analysis**
-
----
-*This analysis was conducted by AURA's Expert Council using MedAgent-Pro methodology with multiple AI specialists.*
-
-⚠️ **Important:** This analysis is for informational purposes. Please consult your healthcare provider for personalized medical advice."""
-    
-    # Log interaction
-    await personalization_manager.log_interaction(
-        query.user_id,
-        query.query,
-        "Expert Council consultation completed",
-        "expert_council_llm_routing",
-        confidence
-    )
-    
-    # Return enhanced response with LLM analysis context
-    response = {
-        "response": final_response,
-        "structured_analysis": structured_analysis,
-        "interactive_components": interactive_components,
-        "service_used": "expert_council_llm_routing",
-        "confidence": confidence,
-        "query_complexity": "expert_council",
-        "user_id": query.user_id,
-        "knowledge_used": True,
-        "personalized": True,
-        "expert_council_session": {
-            "session_id": council_result.get("session_id"),
-            "experts_consulted": council_result.get("metadata", {}).get("experts_consulted", []),
-            "evidence_sources": council_result.get("metadata", {}).get("evidence_sources", []),
-            "workflow": council_result.get("metadata", {}).get("workflow", "medagent_pro_structured_v3")
-        },
-        "reasoning_trace": council_result.get('reasoning_trace', {}),
-        "flow_type": "llm_driven_expert_council",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-    
-    # Add LLM triage context if available
-    if triage_result:
-        response["semantic_analysis"] = {
-            "category": triage_result['category'],
-            "confidence": triage_result['confidence'],
-            "reasoning": triage_result['reasoning'],
-            "medical_indicators": triage_result.get('medical_indicators', [])
-        }
-    
-    return response
-
-# Keep existing endpoints unchanged
 @app.post("/api/chat/continue")
 async def continue_session(continuation: SessionContinuation) -> Dict[str, Any]:
     """Continue an existing conversation session"""
@@ -706,25 +793,20 @@ async def debug_semantic_triage():
         }
     }
 
-# === NEW: EXPERT COUNCIL SESSION OBSERVABILITY ENDPOINTS ===
+# === EXPERT COUNCIL SESSION OBSERVABILITY ENDPOINTS (UNCHANGED) ===
 
 @app.get("/api/council-sessions/recent")
 async def get_recent_council_sessions(
     limit: int = Query(default=10, description="Number of recent sessions to retrieve", ge=1, le=50),
     include_successful_only: bool = Query(default=False, description="Only include successful sessions")
 ) -> Dict[str, Any]:
-    """
-    Get recent Expert Council sessions for monitoring and debugging.
-    OPTIMIZED: Returns 200 OK with an empty list if no results are found.
-    """
+    """Get recent Expert Council sessions for monitoring and debugging"""
     try:
-        # Call the optimized PersonalizationManager method
         sessions = await personalization_manager.get_recent_council_sessions(
             limit=limit, 
             successful_only=include_successful_only
         )
         
-        # Always return 200 OK. An empty list is a valid, successful response.
         return {
             "recent_sessions": sessions,
             "total_returned": len(sessions),
@@ -736,20 +818,11 @@ async def get_recent_council_sessions(
         }
         
     except Exception as e:
-        # This will catch true server-side errors, e.g., DB connection issues.
         raise HTTPException(status_code=500, detail=f"A server error occurred while retrieving recent sessions: {str(e)}")
 
 @app.get("/api/council-sessions/{session_id}")
 async def get_council_session(session_id: str) -> Dict[str, Any]:
-    """
-    Retrieve specific Expert Council session for debugging and review
-    
-    This endpoint provides complete session details including:
-    - Original query and user context
-    - Full reasoning trace through all 7 steps
-    - Structured analysis output
-    - Performance metrics and error details (if any)
-    """
+    """Retrieve specific Expert Council session for debugging and review"""
     session_data = await personalization_manager.get_council_session(session_id)
     
     if not session_data:
@@ -765,15 +838,7 @@ async def get_council_session(session_id: str) -> Dict[str, Any]:
 async def get_council_performance_analytics(
     days: int = Query(default=30, description="Number of days to analyze", ge=1, le=365)
 ) -> Dict[str, Any]:
-    """
-    Get comprehensive Expert Council performance analytics
-    
-    Provides insights into:
-    - Success rates and failure patterns
-    - Average response times and confidence scores
-    - Most common error types and failed steps
-    - Performance trends over time
-    """
+    """Get comprehensive Expert Council performance analytics"""
     analytics = await personalization_manager.get_council_analytics(days=days)
     
     return {
@@ -789,14 +854,7 @@ async def search_council_sessions(
     min_confidence: float = Query(default=0.0, description="Minimum confidence score", ge=0.0, le=1.0),
     days: int = Query(default=7, description="Days to search back", ge=1, le=90)
 ) -> Dict[str, Any]:
-    """
-    Search Expert Council sessions with filters
-    
-    Enables analysis of:
-    - User-specific consultation patterns
-    - High-confidence vs low-confidence sessions
-    - Success/failure trends over time
-    """
+    """Search Expert Council sessions with filters"""
     try:
         from google.cloud import firestore
         from datetime import timedelta
@@ -822,7 +880,6 @@ async def search_council_sessions(
             session_data = doc.to_dict()
             
             if session_data.get('confidence', 0.0) >= min_confidence:
-                # Create summary
                 session_summary = {
                     "session_id": session_data.get("session_id"),
                     "timestamp": session_data.get("timestamp"),
