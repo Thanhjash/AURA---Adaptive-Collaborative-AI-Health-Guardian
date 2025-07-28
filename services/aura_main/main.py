@@ -203,7 +203,7 @@ async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
     
     # Get user context for personalization
     user_context = await personalization_manager.get_user_context(query.user_id)
-    print(f"👤 User context: {len(user_context)} chars")
+    print(f"👤 User: {query.user_id} | Context: {len(user_context)} chars")
     
     # ===== REFACTOR: CENTRALIZED SESSION MANAGEMENT =====
     # Ensure session exists BEFORE any processing
@@ -216,24 +216,24 @@ async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
         return await _handle_direct_expert_council(query)
     
     # === LLM-DRIVEN INTELLIGENT TRIAGE ===
-    print(f"🧠 Running semantic analysis for: '{query.query[:50]}...'")
+    print(f"🧠 Semantic analysis: '{query.query[:50]}...'")
     triage_result = await _intelligent_semantic_triage(query.query, user_context)
     
-    print(f"🎯 Semantic classification: {triage_result['category']} (confidence: {triage_result['confidence']:.2f})")
-    print(f"🔍 Medical indicators: {triage_result.get('medical_indicators', [])}")
+    print(f"🎯 Category: {triage_result['category']} | Confidence: {triage_result['confidence']:.2f} | Indicators: {triage_result.get('medical_indicators', [])}")
     
     # Get RAG context for medical queries
     rag_context = ""
     if triage_result['category'] in ['medical_query_low_priority', 'medical_query_high_priority', 'medical_emergency']:
         rag_context = await rag_manager.get_context_for_query(query.query)
-        print(f"📚 RAG context: {len(rag_context)} chars")
     
     # === INTELLIGENT ROUTING DECISIONS ===
     routing_decision = _determine_intelligent_routing(triage_result, query.session_id)
-    print(f"🚦 Intelligent routing: {routing_decision['strategy']} (reason: {routing_decision['reason']})")
+    print(f"🚦 Route: {routing_decision['strategy']} | Reason: {routing_decision['reason'][:60]}...")
     
     # Execute intelligent routing strategy
-    if routing_decision['strategy'] == 'emergency_guidance':
+    if routing_decision['strategy'] == 'emergency_with_expert_analysis':
+        response = await _handle_emergency_with_expert_analysis(query, triage_result, user_context, rag_context)
+    elif routing_decision['strategy'] == 'emergency_guidance':
         response = await _handle_emergency_guidance(query, triage_result, user_context)
     elif routing_decision['strategy'] == 'direct_expert_council':
         response = await _handle_direct_expert_council(query, triage_result)
@@ -336,6 +336,95 @@ async def _handle_simple_response(query: HealthQuery, user_context: str, triage_
             "triage_category": triage_result['category']
         }
 
+async def _handle_emergency_with_expert_analysis(query: HealthQuery, triage_result: Dict, user_context: str, rag_context: str) -> Dict[str, Any]:
+    """
+    ENHANCED: Handle true emergencies with both immediate guidance AND expert analysis
+    Real emergencies need immediate actions + comprehensive expert assessment
+    """
+    
+    medical_indicators = triage_result.get('medical_indicators', ['Emergency symptoms'])
+    urgency_score = triage_result.get('urgency_score', 0.9)
+    
+    # IMMEDIATE EMERGENCY GUIDANCE (for quick action)
+    immediate_guidance = f"""🚨 **URGENT MEDICAL ATTENTION NEEDED**
+
+**IMMEDIATE ACTIONS - DO NOW:**
+• Call emergency services (911) immediately
+• Go to nearest emergency room - do not drive yourself
+• If possible, have someone stay with you
+• Keep phone nearby and stay calm
+
+**Your situation:** AI analysis indicates {urgency_score:.0%} urgency with symptoms: {', '.join(medical_indicators)}"""
+
+    # PARALLEL: Run Expert Council for detailed analysis
+    print("🏥 Running Expert Council for emergency case...")
+    enhanced_user_context = f"EMERGENCY CASE - user_id: {query.user_id}\n{user_context}"
+    
+    try:
+        council_result = await expert_council.run_expert_council(
+            query=f"EMERGENCY: {query.query}",
+            user_context=enhanced_user_context,
+            rag_context=rag_context
+        )
+        
+        # Extract structured data if successful
+        if council_result.get("success"):
+            structured_analysis = council_result.get("structured_analysis", {})
+            interactive_components = council_result.get("interactive_components", {})
+            expert_response = council_result.get("user_response", "")
+            confidence = council_result.get("confidence", 0.8)
+            
+            # Combined response: Immediate + Expert analysis
+            combined_response = f"""{immediate_guidance}
+
+---
+
+**🏥 EXPERT MEDICAL ANALYSIS**
+
+{expert_response}
+
+⚠️ **Critical:** This combines immediate emergency guidance with AI medical analysis. Only medical professionals can provide definitive emergency care."""
+
+            return {
+                "response": combined_response,
+                "structured_analysis": structured_analysis,  # For frontend components
+                "interactive_components": interactive_components,
+                "immediate_guidance": immediate_guidance,  # Separate immediate actions
+                "expert_analysis": expert_response,  # Separate expert analysis
+                "service_used": "emergency_with_expert_analysis",
+                "confidence": confidence,
+                "category": "emergency",
+                "triage_category": triage_result['category'],
+                "urgency_level": "critical",
+                "immediate_action_required": True,
+                "emergency_indicators": medical_indicators,
+                "expert_council_session": {
+                    "session_id": council_result.get("session_id"),
+                    "workflow": "emergency_expert_analysis"
+                },
+                "reasoning_trace": council_result.get('reasoning_trace', {}),
+                "llm_analysis": {
+                    "urgency_score": urgency_score,
+                    "confidence": triage_result['confidence'],
+                    "reasoning": triage_result['reasoning']
+                }
+            }
+        
+    except Exception as e:
+        print(f"❌ Expert Council failed for emergency, using immediate guidance only: {e}")
+    
+    # Fallback: Immediate guidance only if Expert Council fails
+    return {
+        "response": immediate_guidance + "\n\n*Note: Detailed analysis temporarily unavailable. Please seek immediate medical attention.*",
+        "immediate_guidance": immediate_guidance,
+        "service_used": "emergency_guidance_fallback",
+        "confidence": 0.95,
+        "category": "emergency",
+        "urgency_level": "critical",
+        "immediate_action_required": True,
+        "emergency_indicators": medical_indicators
+    }
+
 async def _handle_emergency_guidance(query: HealthQuery, triage_result: Dict, user_context: str) -> Dict[str, Any]:
     """
     REFACTORED: Handle emergency situations - session management already handled by main endpoint
@@ -387,40 +476,28 @@ Based on AI analysis of your description: "{query.query}", this appears to be a 
 async def _handle_progressive_consultation(query: HealthQuery, user_context: str, rag_context: str, triage_result: Dict) -> Dict[str, Any]:
     """
     REFACTORED: Handle medical queries through progressive consultation
+    OPTIMIZED: Reduced redundant escalation logic
     """
     # Session guaranteed to exist at this point
     
-    # FIX: Properly await get_session_history before calling .get()
+    # OPTIMIZED: Simplified flow - just continue conversation
+    # Let conversation_manager handle escalation logic internally
     try:
-        session_history = await conversation_manager.get_session_history(query.session_id)
-        message_count = len(session_history.get("messages", []))
-        
-        if message_count > 1:
-            print(f"🔄 Continuing conversation: {query.session_id} ({message_count} messages)")
-            response = await conversation_manager.continue_conversation(
-                session_id=query.session_id, 
-                user_message=query.query,
-                user_context=user_context,
-                rag_context=rag_context
-            )
-        else:
-            print(f"🆕 Starting progressive consultation for session: {query.session_id}")
-            # Session already created, use conversation manager for the flow
-            response = await conversation_manager.continue_conversation(
-                session_id=query.session_id,
-                user_message=query.query,
-                user_context=user_context,
-                rag_context=rag_context
-            )
-    except Exception as e:
-        print(f"❌ Session history error, defaulting to continue: {e}")
-        # Fallback: always continue conversation
+        print(f"🔄 Progressive consultation for session: {query.session_id}")
         response = await conversation_manager.continue_conversation(
             session_id=query.session_id,
             user_message=query.query,
             user_context=user_context,
             rag_context=rag_context
         )
+    except Exception as e:
+        print(f"❌ Progressive consultation error: {e}")
+        # Simple fallback
+        return {
+            "response": "I'm having trouble processing your request. Could you please rephrase your concern?",
+            "service_used": "progressive_consultation_fallback",
+            "confidence": 0.3
+        }
     
     # Add LLM analysis metadata
     response["triage_analysis"] = {
@@ -570,13 +647,15 @@ def _determine_intelligent_routing(triage_result: Dict[str, Any], session_id: Op
     urgency_score = triage_result.get('urgency_score', 0.5)
     medical_indicators = triage_result.get('medical_indicators', [])
     
-    # Emergency handling based on LLM analysis
+    # Emergency handling with dual approach
     if category == 'medical_emergency' or urgency_score > 0.85:
         return {
-            "strategy": "emergency_guidance",
-            "reason": f"LLM detected emergency (urgency: {urgency_score:.2f}, indicators: {medical_indicators})",
-            "bypass_conversation": True,
-            "ai_confidence": confidence
+            "strategy": "emergency_with_expert_analysis",  # NEW: Combined approach
+            "reason": f"Emergency requiring immediate guidance + expert analysis (urgency: {urgency_score:.2f})",
+            "bypass_conversation": False,
+            "ai_confidence": confidence,
+            "urgency_score": urgency_score,
+            "medical_indicators": medical_indicators
         }
     
     # High-priority medical with high AI confidence → Expert Council
@@ -625,16 +704,17 @@ def _determine_intelligent_routing(triage_result: Dict[str, Any], session_id: Op
 async def _test_triage_health() -> Dict[str, Any]:
     """Test intelligent triage system health"""
     try:
-        result = await _robust_ai_server_call(
-            "/ai/triage",
-            {"query": "test health check", "context": ""}
-        )
-        return {
-            "status": "healthy", 
-            "model": "gemini-2.0-flash-exp",
-            "llm_driven": result.get("llm_driven", False),
-            "fallback_available": result.get("fallback", False)
-        }
+        # Use basic health endpoint instead of heavy triage call
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            response = await client.get("http://ai_server:9000/health")
+            response.raise_for_status()
+            health_data = response.json()
+            
+            return {
+                "status": "healthy" if health_data.get("status") == "healthy" else "degraded",
+                "models_loaded": health_data.get("models_loaded", False),
+                "gpu_available": health_data.get("gpu_available", False)
+            }
     except Exception as e:
         return {"status": "unavailable", "error": str(e)}
 
