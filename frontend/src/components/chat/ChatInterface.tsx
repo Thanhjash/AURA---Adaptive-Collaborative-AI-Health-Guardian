@@ -1,246 +1,523 @@
 'use client'
 
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Separator } from '@/components/ui/separator'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { 
   Send, 
   Bot, 
   User, 
-  Heart, 
   AlertTriangle, 
   CheckCircle, 
   Clock,
   Activity,
   Brain,
-  Shield,
   Menu,
   Plus,
-  Settings,
-  MessageSquare,
-  History
+  History,
+  Loader2,
+  Trash2
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { 
-  ChatMessage, 
-  ChatResponse, 
   SystemHealth,
   StructuredAnalysis,
   InteractiveComponents
 } from '@/lib/types'
 
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
+  data?: {
+    structured_analysis?: StructuredAnalysis
+    interactive_components?: InteractiveComponents
+    reasoning_trace?: any
+    confidence?: number
+  }
+}
+
 interface ChatHistory {
   session_id: string
   title: string
-  last_message: string
   timestamp: string
-  message_count: number
 }
 
+interface CouncilStep {
+  step: number
+  status: string
+  description: string
+}
+
+// Production API endpoint configuration
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
 export function ChatInterface() {
+  // === CORE STATE ===
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
+  
+  // === SESSION MANAGEMENT (FIXED) ===
+  const [currentSession, setCurrentSession] = useState<string | null>(() => {
+    // Only access sessionStorage on client side
+    if (typeof window !== 'undefined') {
+      const saved = window.sessionStorage.getItem('aura_active_session')
+      return saved || null
+    }
+    return null
+  })
+  
+  // === STREAMING STATE ===
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [streamStatus, setStreamStatus] = useState('')
+  const [councilStep, setCouncilStep] = useState<CouncilStep | null>(null)
+  const [lastRequestTime, setLastRequestTime] = useState(0)
+  const REQUEST_DEBOUNCE_MS = 2000
+  
+  // === UI STATE ===
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null)
-  const [currentSession, setCurrentSession] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [chatHistory, setChatHistory] = useState<ChatHistory[]>([])
+  
+  // === REFS ===
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const isMountedRef = useRef(true)
 
-  const scrollToBottom = () => {
+  // === SESSION MANAGEMENT (IMPROVED) ===
+  const setActiveSession = useCallback((sessionId: string | null) => {
+    if (sessionId !== currentSession) {
+      setCurrentSession(sessionId)
+      if (typeof window !== 'undefined') {
+        if (sessionId) {
+          window.sessionStorage.setItem('aura_active_session', sessionId)
+        } else {
+          window.sessionStorage.removeItem('aura_active_session')
+        }
+      }
+    }
+  }, [currentSession])
+
+  // === EFFECTS ===
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }
+  }, [])
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages])
+  }, [messages, isStreaming])
 
   useEffect(() => {
-    // Check system health and load chat history
-    api.healthCheck().then(setSystemHealth).catch(console.error)
+    isMountedRef.current = true
+    
+    // Load system health (silent fail in production)
+    api.healthCheck()
+      .then(setSystemHealth)
+      .catch(() => {
+        if (process.env.NODE_ENV === 'development') {
+          console.error('Health check failed')
+        }
+      })
+    
     loadChatHistory()
-    inputRef.current?.focus()
+    
+    // Focus input after mount
+    setTimeout(() => {
+      inputRef.current?.focus()
+    }, 100)
+    
+    return () => {
+      isMountedRef.current = false
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
   }, [])
 
+  // === CHAT HISTORY (IMPROVED) ===
   const loadChatHistory = async () => {
+    if (typeof window === 'undefined') return
+    
     try {
-      // Load from localStorage
-      const savedHistory = localStorage.getItem('aura_chat_history')
+      const savedHistory = localStorage.getItem('aura_session_list')
       if (savedHistory) {
-        setChatHistory(JSON.parse(savedHistory))
+        const parsed = JSON.parse(savedHistory)
+        setChatHistory(Array.isArray(parsed) ? parsed : [])
       }
     } catch (error) {
-      console.error('Failed to load chat history:', error)
+      // Silent fail, clear corrupted data
+      localStorage.removeItem('aura_session_list')
+      setChatHistory([])
     }
   }
 
-  const saveToHistory = (sessionId: string, title: string, lastMessage: string) => {
-    const newHistoryItem: ChatHistory = {
+  const saveSessionToList = useCallback((sessionId: string, title: string) => {
+    if (typeof window === 'undefined') return
+    
+    const sessionItem: ChatHistory = {
       session_id: sessionId,
       title: title.slice(0, 50) + (title.length > 50 ? '...' : ''),
-      last_message: lastMessage.slice(0, 100),
-      timestamp: new Date().toISOString(),
-      message_count: 2
+      timestamp: new Date().toISOString()
     }
     
-    const updatedHistory = [newHistoryItem, ...chatHistory.filter(h => h.session_id !== sessionId)]
-    setChatHistory(updatedHistory)
-    localStorage.setItem('aura_chat_history', JSON.stringify(updatedHistory))
+    setChatHistory(prev => {
+      const filtered = prev.filter(h => h.session_id !== sessionId)
+      const updated = [sessionItem, ...filtered].slice(0, 20) // Keep max 20 sessions
+      
+      try {
+        localStorage.setItem('aura_session_list', JSON.stringify(updated))
+      } catch (error) {
+        // Storage full, keep only recent 10
+        const reduced = updated.slice(0, 10)
+        localStorage.setItem('aura_session_list', JSON.stringify(reduced))
+        return reduced
+      }
+      
+      return updated
+    })
+  }, [])
+
+  const clearAllHistory = () => {
+    if (typeof window === 'undefined') return
+    
+    localStorage.removeItem('aura_session_list')
+    setChatHistory([])
+    handleNewChat()
   }
 
-  const updateHistoryItem = (sessionId: string, lastMessage: string, incrementCount: boolean = true) => {
-    const updatedHistory = chatHistory.map(item => 
-      item.session_id === sessionId 
-        ? { 
-            ...item, 
-            last_message: lastMessage.slice(0, 100), 
-            message_count: incrementCount ? item.message_count + 1 : item.message_count
-          }
-        : item
-    )
-    setChatHistory(updatedHistory)
-    localStorage.setItem('aura_chat_history', JSON.stringify(updatedHistory))
-  }
-
-  const formatExpertResponse = (content: string): string => {
-    // Enhanced markdown formatting for Expert Council responses
-    return content
-      .replace(/\*\*(.*?)\*\*/g, '**$1**') // Bold
-      .replace(/\*Key Recommendations:\*/g, '\n**Key Recommendations:**')
-      .replace(/\*Primary Finding:\*/g, '\n**Primary Finding:**')
-      .replace(/\*Confidence Level:\*/g, '\n**Confidence Level:**')
-      .replace(/\*Important:\*/g, '\n**Important:**')
-      .replace(/(\d+\.\s)/g, '\n$1') // Number lists
-      .replace(/^([A-Z][^:]*:)/gm, '**$1**') // Headers
-      .trim()
-  }
+  // === MAIN STREAMING LOGIC (IMPROVED) ===
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return
+    const now = Date.now()
+    
+    // Enhanced debouncing
+    if (now - lastRequestTime < REQUEST_DEBOUNCE_MS) {
+      console.log('Request debounced')
+      return
+    }
+    
+    if (!input.trim() || isStreaming) {
+      return
+    }
+    
+    if (!isMountedRef.current) {
+      return
+    }
+
+    setLastRequestTime(now)
+
+    // Abort any existing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
 
     const userMessage: ChatMessage = {
-      id: Date.now().toString(),
+      id: `user-${Date.now()}`,
       role: 'user',
       content: input,
       timestamp: new Date().toISOString()
     }
 
-    setMessages(prev => [...prev, userMessage])
-    const currentInput = input // Store for history
+    const currentInput = input
     setInput('')
-    setIsLoading(true)
+    setMessages(prev => [...prev, userMessage])
+
+    // Create assistant message placeholder
+    const assistantId = `assistant-${Date.now()}`
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString()
+    }
+
+    setMessages(prev => [...prev, assistantMessage])
+    setIsStreaming(true)
+    setStreamStatus('Connecting...')
+    setCouncilStep(null)
+
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    let finalContent = ''
+    let structuredData: any = null
+    let newSessionId: string | null = null
+
+    // 🔍 FIXED: Properly handle session_id
+    const requestPayload = {
+      query: currentInput,
+      user_id: 'demo_user',
+      session_id: currentSession, // Remove || undefined - send null if no session
+      force_expert_council: false
+    }
+
+    // 🔍 DEBUG: Log what we're sending
+    console.log('🔍 FRONTEND DEBUG - Sending request:')
+    console.log('   - Current session:', currentSession)
+    console.log('   - Request payload:', requestPayload)
 
     try {
-      const response: ChatResponse = await api.chat({
-        query: currentInput,
-        user_id: 'demo_user',
-        session_id: currentSession || undefined,
-        force_expert_council: false
+      await fetchEventSource(`${API_BASE}/api/chat-stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        },
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+
+        async onopen(response) {
+          if (response.ok) {
+            setStreamStatus('Connected')
+            console.log('✅ Stream connection established')
+            return
+          } else {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+          }
+        },
+
+        onmessage(event) {
+          if (!isMountedRef.current) return
+
+          try {
+            switch (event.event) {
+              case 'task_started':
+                const taskData = JSON.parse(event.data)
+                setStreamStatus(taskData.message || 'Task started')
+                break
+
+              case 'session_ready':
+                const sessionData = JSON.parse(event.data)
+                newSessionId = sessionData.session_id
+                
+                // 🔍 FIXED: Only update if different
+                if (sessionData.session_id !== currentSession) {
+                  console.log('🔄 Updating session:', currentSession, '→', sessionData.session_id)
+                  setActiveSession(sessionData.session_id)
+                } else {
+                  console.log('✅ Session confirmed:', sessionData.session_id)
+                }
+                
+                setStreamStatus(sessionData.message || 'Session ready')
+                break
+
+              case 'analysis_start':
+                const analysisData = JSON.parse(event.data)
+                setStreamStatus(analysisData.message || 'Analyzing...')
+                break
+
+              case 'analysis_complete':
+                const analysisCompleteData = JSON.parse(event.data)
+                setStreamStatus(`Analysis: ${analysisCompleteData.category || 'Complete'}`)
+                break
+
+              case 'knowledge_search':
+                const knowledgeData = JSON.parse(event.data)
+                setStreamStatus(knowledgeData.message || 'Searching knowledge...')
+                break
+
+              case 'council_step':
+                const stepData = JSON.parse(event.data)
+                setCouncilStep({
+                  step: stepData.step || 0,
+                  status: stepData.status || 'Processing',
+                  description: stepData.description || ''
+                })
+                setStreamStatus(`Expert Council: ${stepData.status || 'Processing'}`)
+                break
+
+              case 'text_token':
+                const tokenData = JSON.parse(event.data)
+                if (tokenData.token) {
+                  finalContent += tokenData.token
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === assistantId 
+                      ? { ...msg, content: finalContent }
+                      : msg
+                  ))
+                }
+                break
+
+              case 'council_complete':
+                structuredData = JSON.parse(event.data)
+                setCouncilStep(null)
+                setStreamStatus('Analysis complete')
+                break
+
+              case 'error':
+                const errorData = JSON.parse(event.data)
+                setStreamStatus(`Error: ${errorData.error || 'Unknown error'}`)
+                throw new Error(errorData.error || 'Stream error')
+
+              case 'stream_end':
+                const endData = JSON.parse(event.data)
+                console.log('🏁 Stream ended:', endData)
+                setStreamStatus('Complete')
+                break
+
+              default:
+                if (process.env.NODE_ENV === 'development') {
+                  console.log('Unknown event:', event.event, event.data)
+                }
+                break
+            }
+          } catch (parseError) {
+            if (process.env.NODE_ENV === 'development') {
+              console.error('Error parsing event:', parseError, event)
+            }
+          }
+        },
+
+        onclose() {
+          if (!isMountedRef.current) return
+          
+          console.log('🔚 Stream closed')
+          
+          // Apply structured data if available
+          if (structuredData) {
+            setMessages(prev => prev.map(msg => 
+              msg.id === assistantId 
+                ? { ...msg, data: structuredData }
+                : msg
+            ))
+          }
+
+          // 🔍 FIXED: Save to history logic
+          const finalSessionId = newSessionId || currentSession
+          console.log('💾 Saving to history - Session:', finalSessionId, 'Content length:', finalContent.length)
+          
+          if (finalSessionId && finalContent && currentInput) {
+            saveSessionToList(finalSessionId, currentInput)
+          }
+
+          // Reset streaming state
+          setIsStreaming(false)
+          setStreamStatus('')
+          setCouncilStep(null)
+          abortControllerRef.current = null
+          
+          // Focus input for next message
+          setTimeout(() => {
+            inputRef.current?.focus()
+          }, 100)
+        },
+
+        onerror(error) {
+          if (!isMountedRef.current) return
+          
+          console.error('❌ Stream error:', error)
+          
+          setIsStreaming(false)
+          setStreamStatus('Connection error')
+          setCouncilStep(null)
+          abortControllerRef.current = null
+          
+          // If no content was received, show error message
+          if (!finalContent) {
+            const errorMessage: ChatMessage = {
+              id: `error-${Date.now()}`,
+              role: 'assistant',
+              content: `I'm experiencing connection difficulties. Please ensure the backend is running and try again.`,
+              timestamp: new Date().toISOString()
+            }
+            setMessages(prev => [...prev.slice(0, -1), errorMessage])
+          }
+          
+          throw error
+        }
       })
 
-      // Format response for better display
-      let formattedResponse = response.response
-      if (response.service_used.includes('expert_council')) {
-        formattedResponse = formatExpertResponse(response.response)
-      }
-
-      const assistantMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: formattedResponse,
-        timestamp: response.timestamp,
-        metadata: {
-          service_used: response.service_used,
-          confidence: response.confidence,
-          structured_analysis: response.structured_analysis,
-          interactive_components: response.interactive_components,
-          reasoning_trace: response.reasoning_trace,
-          triage_category: response.triage_analysis?.category
-        }
-      }
-
-      setMessages(prev => [...prev, assistantMessage])
-
-      // Handle session and history updates
-      if (response.session_id) {
-        if (!currentSession) {
-          // New session - save to history
-          setCurrentSession(response.session_id)
-          saveToHistory(response.session_id, currentInput, response.response)
-        } else if (response.session_id === currentSession) {
-          // Existing session - update history
-          updateHistoryItem(currentSession, formattedResponse, true)
-        }
-      }
-
     } catch (error) {
-      console.error('Chat error:', error)
-      const errorMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Connection error: ${error instanceof Error ? error.message : 'Unknown error'}. Please ensure Docker services are running.`,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          service_used: 'error_handler',
-          confidence: 0
-        }
+      if (isMountedRef.current) {
+        setIsStreaming(false)
+        setStreamStatus('')
+        setCouncilStep(null)
+        
+        console.error('❌ Send error:', error)
       }
-      setMessages(prev => [...prev, errorMessage])
-    } finally {
-      setIsLoading(false)
     }
   }
-
+  
+  // === UI HANDLERS ===
   const handleNewChat = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
     setMessages([])
-    setCurrentSession(null)
-    loadChatHistory() // Reload history to show updated list
+    setActiveSession(null)
+    setIsStreaming(false)
+    setStreamStatus('')
+    setCouncilStep(null)
+    setLastRequestTime(0)
     inputRef.current?.focus()
   }
 
   const loadChatSession = async (sessionId: string) => {
+    if (isStreaming) return
+
     try {
-      setIsLoading(true)
+      setMessages([])
+      setActiveSession(sessionId)
+      
       const sessionData = await api.getSessionHistory(sessionId)
       
-      if (sessionData.messages) {
+      if (sessionData.messages && Array.isArray(sessionData.messages)) {
         const chatMessages: ChatMessage[] = sessionData.messages.map((msg: any, index: number) => ({
           id: `${sessionId}_${index}`,
           role: msg.role,
-          content: msg.role === 'assistant' && msg.service?.includes('expert_council') 
-            ? formatExpertResponse(msg.content)
-            : msg.content,
-          timestamp: msg.timestamp,
-          metadata: msg.role === 'assistant' ? {
-            service_used: msg.service || 'unknown',
-            confidence: msg.metadata?.confidence || 0
+          content: msg.content || '',
+          timestamp: msg.timestamp || new Date().toISOString(),
+          data: msg.role === 'assistant' && msg.metadata ? {
+            structured_analysis: msg.metadata.structured_analysis,
+            interactive_components: msg.metadata.interactive_components,
+            reasoning_trace: msg.metadata.reasoning_trace,
+            confidence: msg.metadata.confidence
           } : undefined
         }))
         
         setMessages(chatMessages)
-        setCurrentSession(sessionId)
       }
     } catch (error) {
-      console.error('Failed to load session:', error)
-    } finally {
-      setIsLoading(false)
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Failed to load session:', error)
+      }
+      
+      // Show error to user
+      const errorMessage: ChatMessage = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: 'Failed to load conversation history. Starting fresh.',
+        timestamp: new Date().toISOString()
+      }
+      setMessages([errorMessage])
     }
   }
 
-  const getServiceIcon = (service: string) => {
-    if (service.includes('expert_council')) return <Brain className="h-3 w-3" />
-    if (service.includes('progressive')) return <Activity className="h-3 w-3" />
-    if (service.includes('emergency')) return <AlertTriangle className="h-3 w-3" />
-    return <Bot className="h-3 w-3" />
+  const handleQuickResponse = (text: string) => {
+    if (isStreaming) return
+    setInput(text)
+    setTimeout(() => {
+      handleSend()
+    }, 100)
   }
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
+  }
+
+  // === RENDERING HELPERS ===
   const getConfidenceColor = (confidence: number) => {
     if (confidence >= 0.8) return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
     if (confidence >= 0.6) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
@@ -248,7 +525,6 @@ export function ChatInterface() {
   }
 
   const renderMarkdownText = (text: string) => {
-    // Simple markdown rendering for better display
     const parts = text.split(/(\*\*.*?\*\*)/g)
     return parts.map((part, index) => {
       if (part.startsWith('**') && part.endsWith('**')) {
@@ -258,10 +534,7 @@ export function ChatInterface() {
     })
   }
 
-  const renderExpertCouncilReport = (
-    structured: StructuredAnalysis,
-    interactive: InteractiveComponents
-  ) => (
+  const renderExpertCouncilReport = (data: any) => (
     <div className="mt-4 space-y-4 border-l-4 border-blue-500 pl-4 bg-blue-50/50 rounded-r-lg p-4">
       <div className="text-sm font-medium flex items-center gap-2 text-blue-700">
         <Brain className="h-4 w-4" />
@@ -279,22 +552,20 @@ export function ChatInterface() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-lg flex items-center gap-2">
-                {interactive?.summary_card?.title || "Expert Council Assessment"}
+                Expert Council Assessment
                 <Badge variant="default">
-                  {(structured?.clinical_summary as any)?.urgency_level || "assessment"}
+                  {data?.structured_analysis?.clinical_summary?.urgency_level || "assessment"}
                 </Badge>
               </CardTitle>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">
-                {(structured?.clinical_summary as any)?.primary_assessment || 
+                {data?.structured_analysis?.clinical_summary?.primary_assessment || 
                  "Expert analysis completed"}
               </p>
               
               <div className="space-y-2">
-                {((structured?.clinical_summary as any)?.key_findings || 
-                  (structured?.clinical_summary as any)?.safety_considerations || 
-                  []).slice(0, 3).map((finding: string, idx: number) => (
+                {(data?.structured_analysis?.clinical_summary?.key_findings || []).slice(0, 3).map((finding: string, idx: number) => (
                   <div key={idx} className="flex items-start gap-2 text-sm">
                     <CheckCircle className="h-4 w-4 text-green-500 mt-0.5 flex-shrink-0" />
                     <span>{finding}</span>
@@ -304,10 +575,8 @@ export function ChatInterface() {
               
               <div className="mt-3 flex items-center gap-2">
                 <span className="text-xs text-gray-500">Confidence:</span>
-                <Badge className={getConfidenceColor(
-                  (structured as any)?.confidence_assessment?.overall_confidence || 0.7
-                )}>
-                  {(((structured as any)?.confidence_assessment?.overall_confidence || 0.7) * 100).toFixed(0)}%
+                <Badge className={getConfidenceColor(data?.confidence || 0.7)}>
+                  {((data?.confidence || 0.7) * 100).toFixed(0)}%
                 </Badge>
               </div>
             </CardContent>
@@ -322,14 +591,14 @@ export function ChatInterface() {
             <CardContent>
               <div className="flex items-center justify-between mb-2">
                 <span className="font-medium">
-                  {(structured?.differential_diagnoses as any)?.[0]?.condition ||
-                   (structured?.clinical_summary as any)?.primary_assessment ||
+                  {data?.structured_analysis?.differential_diagnoses?.[0]?.condition ||
+                   data?.structured_analysis?.clinical_summary?.primary_assessment ||
                    "Assessment completed"}
                 </span>
-                <Badge>High confidence</Badge>
+                <Badge>Expert Analysis</Badge>
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                Based on comprehensive expert analysis
+                Based on comprehensive multi-agent analysis
               </p>
             </CardContent>
           </Card>
@@ -337,7 +606,7 @@ export function ChatInterface() {
         
         <TabsContent value="actions" className="space-y-3">
           <div className="space-y-4">
-            {((structured?.recommendations as any)?.immediate_actions?.length > 0) && (
+            {(data?.structured_analysis?.recommendations?.immediate_actions?.length > 0) && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base flex items-center gap-2">
@@ -346,7 +615,7 @@ export function ChatInterface() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  {(structured?.recommendations as any)?.immediate_actions?.map((action: string, idx: number) => (
+                  {data.structured_analysis.recommendations.immediate_actions.map((action: string, idx: number) => (
                     <div key={idx} className="flex items-start gap-3 p-2 bg-orange-50 dark:bg-orange-900/20 rounded">
                       <Clock className="h-4 w-4 text-orange-600 mt-0.5 flex-shrink-0" />
                       <div className="flex-1">
@@ -363,6 +632,11 @@ export function ChatInterface() {
     </div>
   )
 
+  // === UI LOGIC ===
+  const isDebounced = Date.now() - lastRequestTime < REQUEST_DEBOUNCE_MS
+  const canSendMessage = !isStreaming && input.trim() && !isDebounced && isMountedRef.current
+  const inputDisabled = isStreaming || !isMountedRef.current
+
   return (
     <div className="flex h-screen bg-white dark:bg-gray-900">
       {/* Sidebar */}
@@ -372,18 +646,28 @@ export function ChatInterface() {
             onClick={handleNewChat}
             className="w-full justify-start gap-2"
             variant="outline"
+            disabled={inputDisabled}
           >
             <Plus className="h-4 w-4" />
             New Chat
           </Button>
           
-          {/* Chat History */}
+          <Button 
+            onClick={clearAllHistory}
+            className="w-full justify-start gap-2"
+            variant="outline"
+            size="sm"
+          >
+            <Trash2 className="h-4 w-4" />
+            Clear All
+          </Button>
+          
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-600 dark:text-gray-300">
               <History className="h-4 w-4" />
               Recent Chats
             </div>
-            <ScrollArea className="h-[300px]">
+            <ScrollArea className="h-[250px]">
               {chatHistory.map((chat) => (
                 <Button
                   key={chat.session_id}
@@ -391,10 +675,13 @@ export function ChatInterface() {
                   size="sm"
                   className="w-full justify-start p-2 h-auto text-left mb-1"
                   onClick={() => loadChatSession(chat.session_id)}
+                  disabled={inputDisabled}
                 >
                   <div className="truncate">
                     <div className="text-xs font-medium truncate">{chat.title}</div>
-                    <div className="text-xs text-gray-500 truncate">{chat.last_message}</div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {new Date(chat.timestamp).toLocaleDateString()}
+                    </div>
                   </div>
                 </Button>
               ))}
@@ -406,7 +693,6 @@ export function ChatInterface() {
             </ScrollArea>
           </div>
           
-          {/* System Status */}
           {systemHealth && (
             <div className="p-3 bg-white dark:bg-gray-700 rounded-lg text-xs">
               <div className="flex items-center gap-2 mb-1">
@@ -416,7 +702,7 @@ export function ChatInterface() {
                 <span className="font-medium">System Status</span>
               </div>
               <div className="text-gray-600 dark:text-gray-300">
-                Expert Council: {systemHealth.systems?.expert_council?.status || 'checking...'}
+                Expert Council: {systemHealth.systems?.expert_council?.status || 'ready'}
               </div>
             </div>
           )}
@@ -444,7 +730,13 @@ export function ChatInterface() {
           <div className="flex items-center gap-2">
             {currentSession && (
               <Badge variant="outline" className="text-xs">
-                Session: {currentSession.split('_')[1]}
+                Session: {currentSession.split('_')[1] || 'Active'}
+              </Badge>
+            )}
+            {isStreaming && (
+              <Badge variant="default" className="text-xs">
+                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                Processing
               </Badge>
             )}
           </div>
@@ -463,7 +755,8 @@ export function ChatInterface() {
                     <Button 
                       variant="outline" 
                       className="p-4 h-auto text-left justify-start"
-                      onClick={() => setInput("I have chest pain and shortness of breath")}
+                      onClick={() => handleQuickResponse("I have chest pain and shortness of breath")}
+                      disabled={inputDisabled}
                     >
                       <AlertTriangle className="h-4 w-4 mr-2 text-red-500" />
                       Emergency symptoms
@@ -471,7 +764,8 @@ export function ChatInterface() {
                     <Button 
                       variant="outline"
                       className="p-4 h-auto text-left justify-start"
-                      onClick={() => setInput("I have a persistent headache for 3 days")}
+                      onClick={() => handleQuickResponse("I have a persistent headache for 3 days")}
+                      disabled={inputDisabled}
                     >
                       <Activity className="h-4 w-4 mr-2 text-blue-500" />
                       Ongoing symptoms
@@ -511,30 +805,47 @@ export function ChatInterface() {
                             </div>
                           </div>
                           
-                          {message.metadata && (
-                            <div className="mt-2 space-y-2">
-                              <div className="flex items-center gap-2 text-xs text-gray-500">
-                                {getServiceIcon(message.metadata.service_used)}
-                                <span>{message.metadata.service_used.replace(/_/g, ' ')}</span>
-                                {message.metadata.confidence > 0 && (
-                                  <Badge className={getConfidenceColor(message.metadata.confidence)} variant="outline">
-                                    {(message.metadata.confidence * 100).toFixed(0)}%
-                                  </Badge>
-                                )}
-                              </div>
-                              
-                              {message.metadata.structured_analysis && message.metadata.interactive_components && 
-                                renderExpertCouncilReport(
-                                  message.metadata.structured_analysis,
-                                  message.metadata.interactive_components
-                                )
-                              }
-                            </div>
-                          )}
+                          {message.role === 'assistant' && message.data && 
+                            renderExpertCouncilReport(message.data)
+                          }
                         </div>
                       </div>
                     </div>
                   ))}
+                  
+                  {/* Streaming Status */}
+                  {isStreaming && (
+                    <div className="flex gap-4 justify-start">
+                      <div className="flex gap-4 max-w-[80%]">
+                        <div className="flex-shrink-0 mt-1">
+                          <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
+                            <Bot className="h-4 w-4 text-white" />
+                          </div>
+                        </div>
+                        <div className="flex-1">
+                          <div className="rounded-2xl px-4 py-3 bg-gray-100 dark:bg-gray-800">
+                            <div className="flex items-center gap-2 text-sm">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span>{streamStatus || 'Processing...'}</span>
+                            </div>
+                            
+                            {councilStep && (
+                              <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded">
+                                <div className="flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300">
+                                  <Brain className="h-3 w-3" />
+                                  <span>Step {councilStep.step}/7: {councilStep.status}</span>
+                                </div>
+                                <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                                  {councilStep.description}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
                   <div ref={messagesEndRef} />
                 </div>
               )}
@@ -551,19 +862,19 @@ export function ChatInterface() {
                   ref={inputRef}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
                   placeholder="Ask AURA about your health concerns..."
-                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
-                  disabled={isLoading}
+                  disabled={inputDisabled}
                   className="pr-12 py-3 text-base"
                 />
                 <Button 
-                  onClick={handleSend} 
-                  disabled={isLoading || !input.trim()}
+                  onClick={handleSend}
+                  disabled={!canSendMessage}
                   size="sm"
                   className="absolute right-2 top-1/2 transform -translate-y-1/2"
                 >
-                  {isLoading ? (
-                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  {isStreaming ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Send className="h-4 w-4" />
                   )}

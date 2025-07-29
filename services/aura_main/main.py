@@ -12,7 +12,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse 
+from fastapi.responses import StreamingResponse, Response  
 from pydantic import BaseModel
 import uvicorn
 import httpx
@@ -37,10 +37,25 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001", 
+        "https://aura-frontend.vercel.app",  # Add your production domain
+        "https://*.vercel.app"  # Allow all Vercel deployments
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=[
+        "*",
+        "Accept",
+        "Accept-Language", 
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "Cache-Control",
+        "X-Requested-With"
+    ],
+    expose_headers=["*"]
 )
 
 # Initialize managers
@@ -66,16 +81,21 @@ class FeedbackRequest(BaseModel):
 
 # ==================== HELPER FUNCTIONS ====================
 
+# 🔍 ALSO UPDATE: _get_or_create_session function
 async def _get_or_create_session(query: HealthQuery, user_context: str) -> str:
     """
-    REFACTOR: Centralized session management
-    Creates new session if none exists, returns existing session_id otherwise
+    REFACTOR: Centralized session management - ONLY CREATE IF NEEDED
     """
+    # 🔍 DEBUG: Check what we received
+    print(f"🔍 _get_or_create_session called:")
+    print(f"   - query.session_id: {query.session_id}")
+    print(f"   - user_id: {query.user_id}")
+    
     if query.session_id:
-        print(f"🔄 Using existing session: {query.session_id}")
+        print(f"🔄 Session already exists: {query.session_id}")
         return query.session_id
     
-    print(f"🆕 Creating new session for user: {query.user_id}")
+    print(f"🆕 Creating NEW session for user: {query.user_id}")
     new_session_data = await conversation_manager.start_conversation(
         user_id=query.user_id,
         initial_query=query.query,
@@ -84,7 +104,7 @@ async def _get_or_create_session(query: HealthQuery, user_context: str) -> str:
     )
     
     session_id = new_session_data.get("session_id")
-    print(f"✅ Session created: {session_id}")
+    print(f"✅ NEW Session created: {session_id}")
     return session_id
 
 async def _robust_ai_server_call(endpoint: str, payload: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
@@ -658,13 +678,30 @@ async def stream_aura_response(query: HealthQuery):
     """
     session_id = None
     try:
+        # 🔍 DEBUG: Log incoming request details
+        print(f"🔍 STREAM REQUEST DEBUG:")
+        print(f"   - Query: {query.query[:50]}...")
+        print(f"   - User ID: {query.user_id}")
+        print(f"   - Incoming session_id: {query.session_id}")
+        print(f"   - Force expert council: {query.force_expert_council}")
+        
         # --- Giai đoạn 1: Khởi tạo & Phân tích ---
         yield f"event: task_started\ndata: {json.dumps({'message': 'Request received, starting analysis...'})}\n\n"
         
         user_context = await personalization_manager.get_user_context(query.user_id)
-        session_id = await _get_or_create_session(query, user_context)
-        query.session_id = session_id
-        yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'Secure session established.'})}\n\n"
+        
+        # 🔍 FIXED: Check if session already exists BEFORE creating
+        if query.session_id:
+            print(f"🔄 Using existing session: {query.session_id}")
+            session_id = query.session_id
+            yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'Existing session restored.'})}\n\n"
+        else:
+            print(f"🆕 Creating new session for user: {query.user_id}")
+            session_id = await _get_or_create_session(query, user_context)
+            query.session_id = session_id
+            yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'New session created.'})}\n\n"
+        
+        print(f"✅ Final session_id: {session_id}")
         
         yield f"event: analysis_start\ndata: {json.dumps({'message': 'Performing semantic triage...'})}\n\n"
         triage_result = await _intelligent_semantic_triage(query.query, user_context)
@@ -678,6 +715,7 @@ async def stream_aura_response(query: HealthQuery):
 
         # --- Giai đoạn 2: Định tuyến đến luồng xử lý phù hợp ---
         strategy = routing_decision['strategy']
+        print(f"🚦 Routing strategy: {strategy}")
 
         if strategy in ['emergency_with_expert_analysis', 'direct_expert_council']:
             async for chunk in run_expert_council_stream(query, user_context, rag_context):
@@ -706,6 +744,7 @@ async def stream_aura_response(query: HealthQuery):
         # Gói tin cuối cùng: Luôn luôn gửi để báo hiệu kết thúc
         final_data = {'message': 'Stream finished.', 'session_id': session_id}
         yield f"event: stream_end\ndata: {json.dumps(final_data)}\n\n"
+        print(f"🏁 Stream completed for session: {session_id}")
 
 # ==================== UTILITY FUNCTIONS ====================
 
@@ -819,18 +858,41 @@ async def _test_triage_health() -> Dict[str, Any]:
 
 # ==================== NEW/UPDATED ENDPOINTS ====================
 
-# Thay thế endpoint của bạn bằng cái này
+@app.options("/api/chat-stream")
+async def options_chat_stream():
+    """Handle preflight requests for streaming endpoint"""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400"
+        }
+    )
+
+# Update your streaming endpoint headers:
 @app.post("/api/chat-stream")
 async def chat_stream_endpoint(query: HealthQuery):
-    """
-    ENDPOINT STREAMING MỚI cho Vercel AI SDK với các headers tối ưu.
-    """
+    """Enhanced streaming endpoint with proper CORS headers"""
+    
+    # Enhanced headers for better streaming compatibility
     headers = {
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
         "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",  # Disable nginx buffering
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "*"
     }
-    return StreamingResponse(stream_aura_response(query), media_type="text/event-stream", headers=headers)
+    
+    return StreamingResponse(
+        stream_aura_response(query), 
+        media_type="text/event-stream",
+        headers=headers
+    )
 
 async def handle_non_stream_chat(query: HealthQuery) -> Dict[str, Any]:
     """
