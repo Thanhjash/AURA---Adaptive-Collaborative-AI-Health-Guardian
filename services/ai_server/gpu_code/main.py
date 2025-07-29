@@ -1,6 +1,8 @@
 # services/ai_server/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import os
 import asyncio
 import json
@@ -8,63 +10,49 @@ import re
 from contextlib import asynccontextmanager
 import google.generativeai as genai
 
-# GGUF support
-try:
-    from llama_cpp import Llama
-    GGUF_AVAILABLE = True
-except ImportError:
-    GGUF_AVAILABLE = False
-    print("⚠️ llama-cpp-python not installed. Install with: pip install llama-cpp-python")
-
 # Set cache directory
 os.environ['HF_HOME'] = '/app/.hf_cache'
 
 # Global model variables
 MEDGEMMA_MODEL = None
+MEDGEMMA_TOKENIZER = None
 MODEL_LOADED = False
 STARTUP_ERROR = None
 TRIAGE_CLIENT = None
 
 async def load_models():
-    global MEDGEMMA_MODEL, MODEL_LOADED, STARTUP_ERROR, TRIAGE_CLIENT
+    global MEDGEMMA_MODEL, MEDGEMMA_TOKENIZER, MODEL_LOADED, STARTUP_ERROR, TRIAGE_CLIENT
     
     try:
-        if not GGUF_AVAILABLE:
-            raise ImportError("llama-cpp-python not available")
-            
-        print("🚀 Loading MedGemma GGUF (CPU optimized)...")
+        print("🚀 Loading MedGemma (shared for all services)...")
+        model_name = "unsloth/medgemma-4b-it-bnb-4bit"
         
-        # Download and load GGUF model
-        model_path = "/app/.hf_cache/medgemma-4b-it-Q4_K_M.gguf"
-        model_repo = "unsloth/medgemma-4b-it-GGUF"
-        
-        # Check if model exists locally, if not download
-        if not os.path.exists(model_path):
-            print("📥 Downloading GGUF model...")
-            from huggingface_hub import hf_hub_download
-            
-            model_path = hf_hub_download(
-                repo_id=model_repo,
-                filename="medgemma-4b-it-Q4_K_M.gguf",
-                cache_dir="/app/.hf_cache"
-            )
-            print(f"✅ Model downloaded to: {model_path}")
-        
-        # Load GGUF model with optimized settings for CPU
-        print("🔬 Loading GGUF model...")
-        MEDGEMMA_MODEL = Llama(
-            model_path=model_path,
-            n_ctx=2048,  # Context window
-            n_batch=512,  # Batch size for prompt processing
-            n_threads=None,  # Use all available CPU threads
-            verbose=False,
-            use_mmap=True,  # Memory mapping for efficiency
-            use_mlock=False,  # Don't lock memory pages
-            n_gpu_layers=0  # CPU only (set to -1 for GPU if available)
+        # BitsAndBytesConfig for 4-bit quantization
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
         )
         
-        print("✅ MedGemma GGUF loaded successfully")        
-        print(f"📊 Model ready for CPU inference")
+        print("🔬 Loading MedGemma with 4-bit quantization...")
+        
+        # Load tokenizer
+        MEDGEMMA_TOKENIZER = AutoTokenizer.from_pretrained(model_name)
+        if MEDGEMMA_TOKENIZER.pad_token is None:
+            MEDGEMMA_TOKENIZER.pad_token = MEDGEMMA_TOKENIZER.eos_token
+        
+        # Load model with quantization
+        MEDGEMMA_MODEL = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch.bfloat16
+        )
+        
+        print("✅ MedGemma loaded with quantization")        
+        print(f"✅ Model loaded on {MEDGEMMA_MODEL.device}")
+        print(f"📊 Memory allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
         
         MODEL_LOADED = True
         
@@ -83,22 +71,22 @@ async def load_models():
             TRIAGE_CLIENT = None
         
     except Exception as e:
-        print(f"❌ Failed to load MedGemma GGUF: {e}")
+        print(f"❌ Failed to load MedGemma: {e}")
         STARTUP_ERROR = str(e)
         MODEL_LOADED = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    print("🔄 Starting AI Server (GGUF)...")
+    print("🔄 Starting AI Server...")
     await load_models()
     yield
     # Shutdown
     print("🔄 Shutting down AI Server...")
 
 app = FastAPI(
-    title="AURA AI Server (GGUF)", 
-    version="2.1.0",
+    title="AURA AI Server", 
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -116,10 +104,9 @@ class TriageQuery(BaseModel):
 @app.get("/")
 async def root():
     return {
-        "service": "AURA AI Server (GGUF)", 
+        "service": "AURA AI Server", 
         "status": "operational",
         "model_loaded": MODEL_LOADED,
-        "model_type": "GGUF (CPU optimized)",
         "triage_available": TRIAGE_CLIENT is not None,
         "capabilities": ["Medical VQA", "Wellness Analysis", "Intelligent Triage"]
     }
@@ -129,11 +116,9 @@ async def health():
     return {
         "status": "healthy" if MODEL_LOADED else "loading",
         "models_loaded": MODEL_LOADED,
-        "model_format": "GGUF",
-        "inference_device": "CPU",
         "triage_client_ready": TRIAGE_CLIENT is not None,
         "startup_error": STARTUP_ERROR,
-        "gguf_available": GGUF_AVAILABLE
+        "gpu_available": torch.cuda.is_available() if torch else False
     }
 
 @app.post("/ai/triage")
@@ -379,107 +364,56 @@ def _conservative_fallback_triage(query: str):
         "fallback": True
     }
 
-def _generate_response(prompt: str, max_tokens: int = 150, temperature: float = 0.7):
-    """Generate response using GGUF model with better parameters"""
+@app.post("/ai/vqa")
+async def medical_vqa(request: VQARequest):
     if not MODEL_LOADED:
         raise HTTPException(503, f"Model not loaded. Error: {STARTUP_ERROR}")
     
+    prompt = f"As a medical imaging specialist, analyze this image and answer: {request.question}\n\nProvide a clear, professional medical assessment."
+    
     try:
-        print(f"🔍 Generation request - Prompt: {prompt[:100]}...")
+        inputs = MEDGEMMA_TOKENIZER(prompt, return_tensors='pt').to(MEDGEMMA_MODEL.device)
         
-        # Generate response with GGUF model
-        response = MEDGEMMA_MODEL(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=0.9,
-            echo=False,  # Don't repeat the prompt
-            stop=["<|im_end|>", "\n\n\n"],  # Better stop tokens for MedGemma
-            repeat_penalty=1.1
-        )
-        
-        generated_text = response['choices'][0]['text'].strip()
-        print(f"✅ Generated {len(generated_text)} characters")
-        
-        # If empty, try without stop tokens
-        if not generated_text:
-            print("⚠️ Empty response, retrying without stop tokens...")
-            response = MEDGEMMA_MODEL(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.9,
-                echo=False,
-                stop=[],  # No stop tokens
-                repeat_penalty=1.1
+        with torch.no_grad():
+            outputs = MEDGEMMA_MODEL.generate(
+                **inputs, 
+                max_new_tokens=150, 
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=MEDGEMMA_TOKENIZER.eos_token_id
             )
-            generated_text = response['choices'][0]['text'].strip()
-            print(f"🔄 Retry generated {len(generated_text)} characters")
         
-        return generated_text
+        response = MEDGEMMA_TOKENIZER.decode(outputs[0], skip_special_tokens=True)
+        answer = response[len(prompt):].strip()
         
-    except Exception as e:
-        print(f"❌ Generation error: {e}")
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-@app.post("/ai/wellness")
-async def mental_wellness(request: WellnessRequest):
-    # Better prompt format for MedGemma
-    prompt = f"""<|im_start|>system
-You are a compassionate mental health professional providing supportive guidance.
-<|im_end|>
-<|im_start|>user
-{request.message}
-<|im_end|>
-<|im_start|>assistant
-"""
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=250, temperature=0.8)
-        return {"response": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-@app.post("/ai/vqa")
-async def medical_vqa(request: VQARequest):
-    # Better prompt format for MedGemma
-    prompt = f"""<|im_start|>system
-You are a medical imaging specialist providing professional medical assessments.
-<|im_end|>
-<|im_start|>user
-Analyze this image and answer: {request.question}
-<|im_end|>
-<|im_start|>assistant
-"""
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=200, temperature=0.7)
-        return {"answer": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-
-
-@app.post("/ai/vqa")
-async def medical_vqa(request: VQARequest):
-    prompt = f"As a medical imaging specialist, analyze this image and answer: {request.question}\n\nProvide a clear, professional medical assessment.\n\nResponse:"
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=200, temperature=0.7)
-        return {"answer": answer, "model": "MedGemma-GGUF"}
+        return {"answer": answer, "model": "MedGemma"}
         
     except Exception as e:
         raise HTTPException(500, f"Generation failed: {str(e)}")
 
 @app.post("/ai/wellness")
 async def mental_wellness(request: WellnessRequest):
-    prompt = f"As a compassionate mental health professional, provide supportive guidance for: {request.message}\n\nRespond with empathy and practical advice.\n\nResponse:"
+    if not MODEL_LOADED:
+        raise HTTPException(503, f"Model not loaded. Error: {STARTUP_ERROR}")
+    
+    prompt = f"As a compassionate mental health professional, provide supportive guidance for: {request.message}\n\nRespond with empathy and practical advice."
     
     try:
-        answer = _generate_response(prompt, max_tokens=250, temperature=0.8)
-        return {"response": answer, "model": "MedGemma-GGUF"}
+        inputs = MEDGEMMA_TOKENIZER(prompt, return_tensors='pt').to(MEDGEMMA_MODEL.device)
+        
+        with torch.no_grad():
+            outputs = MEDGEMMA_MODEL.generate(
+                **inputs, 
+                max_new_tokens=200, 
+                temperature=0.8,
+                do_sample=True,
+                pad_token_id=MEDGEMMA_TOKENIZER.eos_token_id
+            )
+        
+        response = MEDGEMMA_TOKENIZER.decode(outputs[0], skip_special_tokens=True)
+        answer = response[len(prompt):].strip()
+        
+        return {"response": answer, "model": "MedGemma"}
         
     except Exception as e:
         raise HTTPException(500, f"Generation failed: {str(e)}")

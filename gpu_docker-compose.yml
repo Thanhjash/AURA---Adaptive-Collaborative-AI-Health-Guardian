@@ -1,37 +1,53 @@
 services:
   ai_server:
-    image: vgxtj/aura-ai-server:latest
     build: ./services/ai_server
     ports:
       - "9000:9000"
+    volumes:
+      - /mnt/d/3.Project/AURA-Health-Guardian/.hf_cache:/app/.hf_cache
     environment:
       - HF_HOME=/app/.hf_cache
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - CUDA_VISIBLE_DEVICES=0
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY} 
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - aura_network
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9000/health', timeout=5)"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 3
-      start_period: 120s  # GGUF model loading time
+      retries: 6
+      start_period: 90s  # Allow time for MedGemma model loading
 
   ecg_interpreter:
-    image: vgxtj/aura-ecg-interpreter:latest
     build: ./services/ecg_interpreter
     ports:
       - "8001:8001"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - aura_network
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health', timeout=5)"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 60s
+      start_period: 45s
 
   radiology_vqa:
-    image: vgxtj/aura-radiology-vqa:latest
     build: ./services/radiology_vqa
     ports:
       - "8002:8002"
@@ -42,7 +58,6 @@ services:
       - aura_network
 
   mental_wellness:
-    image: vgxtj/aura-mental-wellness:latest
     build: ./services/mental_wellness
     ports:
       - "8003:8003"
@@ -53,18 +68,16 @@ services:
       - aura_network
 
   aura_main:
-    image: vgxtj/aura-main:latest
     build:
       context: .
       dockerfile: services/aura_main/Dockerfile
     ports:
       - "8000:8000"
+    volumes:
+      - ./config:/app/config
     environment:
-      - ENV=production
+      - ENV=development
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - FIREBASE_SERVICE_ACCOUNT_PATH=${FIREBASE_SERVICE_ACCOUNT_PATH}
     depends_on:
       ai_server:
         condition: service_healthy
