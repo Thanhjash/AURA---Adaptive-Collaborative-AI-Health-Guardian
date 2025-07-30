@@ -1,3 +1,6 @@
+# .github/workflows/backend-ci.yml
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
 name: Backend CI/CD
 
 on:
@@ -7,61 +10,75 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch)  
-        uses: docker/setup-qemu-action@v2
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      with:
+        install: true
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-        with:
-          install: true
-          driver: docker-container
-          driver-opts: |
-            image=moby/buildkit:master
+    - name: Log in to Docker Hub
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" \
+          | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-      - name: Log in to Docker Hub (CLI)
-        run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" \
-            | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+    # ---------- build the heavy base layer once ------------
+    - name: Build and push aura-base
+      run: |
+        docker buildx build \
+          --pull \
+          --progress plain \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -t vgxtj/aura-base:latest \
+          -f Dockerfile.base . \
+          --push
+        # free the workspace
+        docker builder prune -f
 
-      - name: Build & push aura-base
-        run: |
+    # ---------- build service images one‑by‑one ------------
+    - name: Build and push each service (sequential)
+      env:
+        REPO: vgxtj
+      run: |
+        set -e
+        SERVICES="ai_server ecg_interpreter radiology_vqa mental_wellness aura_main"
+        for svc in $SERVICES; do
+          echo "🔨  Building $svc"
           docker buildx build \
-            --platform linux/amd64 \
-            --tag vgxtj/aura-base:latest \
-            --cache-from=type=registry,ref=vgxtj/aura-base:latest \
-            --cache-to=type=inline \
-            --push \
-            -f Dockerfile.base .
+            --pull \
+            --progress plain \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $REPO/aura-${svc}:latest \
+            -f services/${svc}/Dockerfile . \
+            --push
+          # Immediately reclaim disk before the next image
+          docker builder prune -f
+        done
 
-      - name: Build & push all services
-        run: |
-          for svc in ai-server ecg-interpreter radiology-vqa mental-wellness aura-main; do
-            docker buildx build \
-              --platform linux/amd64 \
-              --tag vgxtj/aura-${svc}:latest \
-              --cache-from=type=registry,ref=vgxtj/aura-${svc}:latest \
-              --cache-to=type=inline \
-              --push \
-              -f services/${svc}/Dockerfile \
-              services/${svc}
-          done
+    # ---------- prepare the PEM key ------------
+    - name: Write SSH key
+      run: |
+        printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" | tr -d '\r' > aura-key.pem
+        chmod 600 aura-key.pem
 
-      - name: Write SSH key
-        run: |
-          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" | tr -d '\r' > aura-key.pem
-          chmod 600 aura-key.pem
+    # ---------- quick connectivity smoke‑test ------------
+    - name: Test SSH connectivity
+      run: |
+        ssh -i aura-key.pem -o StrictHostKeyChecking=no \
+            ubuntu@${{ secrets.EC2_HOST }} echo "SSH connection OK"
 
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host:      ${{ secrets.EC2_HOST }}
-          username:  ubuntu
-          key_path:  aura-key.pem
-          script: |
-            cd ~/aura
-            docker compose pull
-            docker compose up -d --remove-orphans
+    # ---------- deploy ------------
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v0.1.6
+      with:
+        host:      ${{ secrets.EC2_HOST }}
+        username:  ubuntu
+        key_path:  aura-key.pem
+        debug:     true
+        script: |
+          cd ~/aura
+          docker compose pull
+          docker compose up -d
