@@ -11,25 +11,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (for multi-arch)  
+        uses: docker/setup-qemu-action@v2
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+        with:
+          install: true
+          driver: docker-container
+          driver-opts: |
+            image=moby/buildkit:master
 
-      - name: Log in to Docker Hub (with CLI)
+      - name: Log in to Docker Hub (CLI)
         run: |
           echo "${{ secrets.DOCKERHUB_TOKEN }}" \
             | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-      - name: Build and push aura-base
+      - name: Build & push aura-base
         run: |
-          docker build \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            -t vgxtj/aura-base:latest \
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag vgxtj/aura-base:latest \
+            --cache-from=type=registry,ref=vgxtj/aura-base:latest \
+            --cache-to=type=inline \
+            --push \
             -f Dockerfile.base .
-          docker push vgxtj/aura-base:latest
 
-      - name: Build and push all services
+      - name: Build & push all services
         run: |
-          docker compose build --pull --progress=plain --build-arg BUILDKIT_INLINE_CACHE=1 --push
+          for svc in ai-server ecg-interpreter radiology-vqa mental-wellness aura-main; do
+            docker buildx build \
+              --platform linux/amd64 \
+              --tag vgxtj/aura-${svc}:latest \
+              --cache-from=type=registry,ref=vgxtj/aura-${svc}:latest \
+              --cache-to=type=inline \
+              --push \
+              -f services/${svc}/Dockerfile \
+              services/${svc}
+          done
 
       - name: Write SSH key
         run: |
@@ -45,4 +64,4 @@ jobs:
           script: |
             cd ~/aura
             docker compose pull
-            docker compose up -d
+            docker compose up -d --remove-orphans
