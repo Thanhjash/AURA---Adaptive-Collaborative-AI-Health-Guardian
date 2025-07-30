@@ -1,89 +1,77 @@
+version: "3.9"
+
 services:
   ai_server:
     image: vgxtj/aura-ai-server:latest
-    build: 
+    build:
       context: .
       dockerfile: ./services/ai_server/Dockerfile
-    ports:
-      - "9000:9000"
+    ports: ["9000:9000"]
     environment:
       - HF_HOME=/app/.hf_cache
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-    networks:
-      - aura_network
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9000/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests,sys; requests.get('http://localhost:9000/health',timeout=5)"]
       interval: 30s
       timeout: 12s
       retries: 5
-      start_period: 300s  # GGUF model loading time
+      start_period: 300s
+    networks: [aura_network]
 
   ecg_interpreter:
     image: vgxtj/aura-ecg-interpreter:latest
     build:
-      context: .  # Root context  
+      context: .
       dockerfile: services/ecg_interpreter/Dockerfile
-    ports:
-      - "8001:8001"
-    networks:
-      - aura_network
+    ports: ["8001:8001"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests,sys; requests.get('http://localhost:8001/health',timeout=5)"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 60s
+    networks: [aura_network]
 
   radiology_vqa:
     image: vgxtj/aura-radiology-vqa:latest
     build:
-      context: .  # Root context
+      context: .
       dockerfile: services/radiology_vqa/Dockerfile
-    ports:
-      - "8002:8002"
+    ports: ["8002:8002"]
     depends_on:
-      ai_server:
-        condition: service_healthy
-    networks:
-      - aura_network
+      ai_server: { condition: service_healthy }
+    networks: [aura_network]
 
   mental_wellness:
     image: vgxtj/aura-mental-wellness:latest
     build:
-      context: .  # Root context
+      context: .
       dockerfile: services/mental_wellness/Dockerfile
-    ports:
-      - "8003:8003"
+    ports: ["8003:8003"]
     depends_on:
-      ai_server:
-        condition: service_healthy
-    networks:
-      - aura_network
+      ai_server: { condition: service_healthy }
+    networks: [aura_network]
 
   aura_main:
     image: vgxtj/aura-main:latest
     build:
       context: .
       dockerfile: services/aura_main/Dockerfile
-    ports:
-      - "8000:8000"
+    ports: ["8000:8000"]
     environment:
       - ENV=production
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
       - FIREBASE_SERVICE_ACCOUNT_PATH=${FIREBASE_SERVICE_ACCOUNT_PATH}
+    volumes:
+      - ./config/secrets:/app/config/secrets:ro
     depends_on:
-      ai_server:
-        condition: service_healthy
-      ecg_interpreter:
-        condition: service_healthy
-      radiology_vqa:
-        condition: service_started
-      mental_wellness:
-        condition: service_started
-    networks:
-      - aura_network
+      ai_server:       { condition: service_healthy }
+      ecg_interpreter: { condition: service_healthy }
+      radiology_vqa:   { condition: service_started }
+      mental_wellness: { condition: service_started }
+    networks: [aura_network]
 
 networks:
   aura_network:
