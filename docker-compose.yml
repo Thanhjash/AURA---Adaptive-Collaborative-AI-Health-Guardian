@@ -14,9 +14,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9000/health', timeout=5)"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s  # GGUF model loading time
+      timeout: 12s
+      retries: 5
+      start_period: 300s  # GGUF model loading time
 
   ecg_interpreter:
     image: vgxtj/aura-ecg-interpreter:latest
