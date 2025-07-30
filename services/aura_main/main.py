@@ -37,12 +37,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001", 
-        "https://aura-frontend.vercel.app",  # Add your production domain
-        "https://*.vercel.app"  # Allow all Vercel deployments
-    ],
+    # allow_origins=[
+    #     "http://localhost:3000",
+    #     "http://localhost:3001", 
+    #     "https://aura-frontend.vercel.app",  # Add your production domain
+    #     "https://*.vercel.app"  # Allow all Vercel deployments
+    # ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=[
