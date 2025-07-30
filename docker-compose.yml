@@ -1,7 +1,9 @@
 services:
   ai_server:
     image: vgxtj/aura-ai-server:latest
-    build: ./services/ai_server
+    build: 
+      context: .
+      dockerfile: ./services/ai_server/Dockerfile
     ports:
       - "9000:9000"
     environment:
@@ -18,7 +20,9 @@ services:
 
   ecg_interpreter:
     image: vgxtj/aura-ecg-interpreter:latest
-    build: ./services/ecg_interpreter
+    build:
+      context: .  # Root context  
+      dockerfile: services/ecg_interpreter/Dockerfile
     ports:
       - "8001:8001"
     networks:
@@ -32,7 +36,9 @@ services:
 
   radiology_vqa:
     image: vgxtj/aura-radiology-vqa:latest
-    build: ./services/radiology_vqa
+    build:
+      context: .  # Root context
+      dockerfile: services/radiology_vqa/Dockerfile
     ports:
       - "8002:8002"
     depends_on:
@@ -43,7 +49,9 @@ services:
 
   mental_wellness:
     image: vgxtj/aura-mental-wellness:latest
-    build: ./services/mental_wellness
+    build:
+      context: .  # Root context
+      dockerfile: services/mental_wellness/Dockerfile
     ports:
       - "8003:8003"
     depends_on:

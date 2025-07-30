@@ -1,13 +1,41 @@
+# Python
 **/__pycache__
 **/*.pyc
 **/*.pyo
 **/*.pyd
+.pytest_cache
+
+# Environment & Config
+.env
+.env.local
+*.env
+
+# Development
 .git
 .gitignore
-README.md
 .vscode
-.pytest_cache
 requirements-dev.txt
 activate_env.sh
-*.pyc
+
+# Documentation
+README.md
+docs/
+
+# Frontend (not needed in backend containers)
+frontend/
+node_modules/
+
+# Backup files
+backup_gpu/
+*backup*
+*.backup
+*.bak
+
+# Cache directories
+.hf_cache/
 __pycache__/
+.cache/
+
+# Logs
+*.log
+logs/
