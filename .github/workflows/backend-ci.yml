@@ -68,9 +68,9 @@ jobs:
     - name: Test SSH connectivity
       run: |
         ssh -i aura-key.pem -o StrictHostKeyChecking=no \
-            ubuntu@${{ secrets.EC2_HOST }} echo "SSH connection OK"
+            ubuntu@${{ secrets.EC2_HOST }} echo "SSH connection OK"
 
-    # ---------- deploy ------------
+    # ---------- deploy to EC2 ------------
     - name: Deploy to EC2
       uses: appleboy/ssh-action@v0.1.6
       with:
@@ -82,3 +82,11 @@ jobs:
           cd ~/aura
           docker compose pull
           docker compose up -d
+
+    # ---------- trigger Vercel redeploy ------------
+    - name: Trigger Vercel Deploy Hook
+      if: success()
+      run: |
+        echo "🔔 Triggering Vercel frontend redeploy..."
+        curl -fsS -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}" || \
+        echo "⚠️  Failed to call Vercel hook (non-fatal)"
