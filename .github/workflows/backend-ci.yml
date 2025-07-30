@@ -29,8 +29,11 @@ jobs:
 
       - name: Build and push all services
         run: |
-          docker compose build --build-arg BUILDKIT_INLINE_CACHE=1
-          docker compose push
+          docker compose build \
+            --pull \
+            --progress=plain \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --push
 
       - name: Write SSH key
         run: |
