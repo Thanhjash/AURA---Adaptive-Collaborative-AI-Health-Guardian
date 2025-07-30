@@ -32,12 +32,17 @@ jobs:
           docker compose build --build-arg BUILDKIT_INLINE_CACHE=1
           docker compose push
 
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v0.1.6
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key_path: ec2_key.pem
           script: |
             cd ~/aura
             docker compose pull
