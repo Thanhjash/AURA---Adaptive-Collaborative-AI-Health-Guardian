@@ -12,9 +12,9 @@ google-generativeai>=0.8.0
 supabase==2.17.0
 
 # ML Core – đảm bảo SciPy & scikit-learn tương thích
-numpy>=1.22.4,<2.0
-scipy>=1.13.0,<1.14.0
-scikit-learn>=1.4,<2.0
+numpy==1.26.4
+scipy==1.12.0
+scikit-learn==1.4.2
 sentence-transformers==5.0.0
 
 # Torch CPU build (bản CPU-only)
