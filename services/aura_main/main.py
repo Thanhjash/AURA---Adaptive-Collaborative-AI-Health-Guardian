@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
+from fastapi import FastAPI, HTTPException
 
 # Import from models.py to avoid circular dependency
 from models import HealthQuery 
@@ -62,6 +63,17 @@ async def chat_stream_endpoint(query: HealthQuery):
 async def health_check():
     """Health check delegates to ConversationManager."""
     return await conversation_manager.health_check()
+
+@app.get("/get-session-history/{session_id}")
+async def get_session_history_endpoint(session_id: str):
+    """Endpoint for frontend to reload specific session history."""
+    try:
+        history = await conversation_manager.get_session_history(session_id)
+        if "error" in history:
+            raise HTTPException(status_code=404, detail=history["error"])
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve session: {str(e)}")
 
 # --- DEV SERVER ---
 if __name__ == "__main__":

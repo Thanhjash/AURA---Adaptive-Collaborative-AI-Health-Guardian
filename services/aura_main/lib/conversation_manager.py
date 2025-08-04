@@ -431,3 +431,21 @@ Please provide clear, actionable guidance for this health concern.
                 "expert_council_enabled": os.getenv("ENABLE_EXPERT_COUNCIL", "false").lower() == "true"
             }
         }
+
+    async def get_session_history(self, session_id: str) -> dict:
+        """Retrieve complete session state from Firestore."""
+        try:
+            doc_ref = self.personalization_manager.db.collection('sessions').document(session_id)
+            doc = await doc_ref.get()
+            if doc.exists:
+                session_data = doc.to_dict()
+                # Ensure message_history exists for frontend compatibility
+                if 'message_history' not in session_data:
+                    session_data['message_history'] = []
+                return session_data
+            else:
+                return {"error": "Session not found"}
+        except Exception as e:
+            print(f"Error fetching session history for {session_id}: {e}")
+            return {"error": "Failed to retrieve session history"}
+        
