@@ -35,28 +35,21 @@ app = FastAPI(
     version="6.0.0-stream"
 )
 
+ALLOWED_ORIGINS = [
+    "https://44-217-60-106.sslip.io",
+    # "https://api.44-217-60-106.sslip.io",   # không bắt buộc nhưng vô hại
+    "https://*.vercel.app",                 # preview build
+    "http://localhost:3000",                # FE dev
+    # "https://www.yourdomain.com",         # FE prod custom – thêm khi có
+    "https://aura-adaptive-collaborative-ai-heal.vercel.app/",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=[
-    #     "http://localhost:3000",
-    #     "http://localhost:3001", 
-    #     "https://aura-frontend.vercel.app",  # Add your production domain
-    #     "https://*.vercel.app"  # Allow all Vercel deployments
-    # ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=ALLOWED_ORIGINS,          # dùng list
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "*",
-        "Accept",
-        "Accept-Language", 
-        "Content-Language",
-        "Content-Type",
-        "Authorization",
-        "Cache-Control",
-        "X-Requested-With"
-    ],
-    expose_headers=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Initialize managers

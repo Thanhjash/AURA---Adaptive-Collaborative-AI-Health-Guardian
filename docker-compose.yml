@@ -6,10 +6,12 @@ services:
     build:
       context: .
       dockerfile: ./services/ai_server/Dockerfile
-    ports: ["9000:9000"]
+    ports:
+      - "9000:9000"
+    env_file:
+      - .env
     environment:
       - HF_HOME=/app/.hf_cache
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     healthcheck:
       test: ["CMD", "python", "-c", "import requests,sys; requests.get('http://localhost:9000/health',timeout=5)"]
       interval: 30s
@@ -23,7 +25,10 @@ services:
     build:
       context: .
       dockerfile: services/ecg_interpreter/Dockerfile
-    ports: ["8001:8001"]
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
     healthcheck:
       test: ["CMD", "python", "-c", "import requests,sys; requests.get('http://localhost:8001/health',timeout=5)"]
       interval: 15s
@@ -37,7 +42,10 @@ services:
     build:
       context: .
       dockerfile: services/radiology_vqa/Dockerfile
-    ports: ["8002:8002"]
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
     depends_on:
       ai_server: { condition: service_healthy }
     networks: [aura_network]
@@ -47,7 +55,10 @@ services:
     build:
       context: .
       dockerfile: services/mental_wellness/Dockerfile
-    ports: ["8003:8003"]
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
     depends_on:
       ai_server: { condition: service_healthy }
     networks: [aura_network]
@@ -57,13 +68,10 @@ services:
     build:
       context: .
       dockerfile: services/aura_main/Dockerfile
-    ports: ["8000:8000"]
-    environment:
-      - ENV=production
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - FIREBASE_SERVICE_ACCOUNT_PATH=${FIREBASE_SERVICE_ACCOUNT_PATH}
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
     volumes:
       - ./config/secrets:/app/config/secrets:ro
     depends_on:
