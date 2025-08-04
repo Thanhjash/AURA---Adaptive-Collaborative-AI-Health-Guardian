@@ -669,32 +669,31 @@ async def stream_aura_response(query: HealthQuery):
     """
     session_id = None
     try:
-        # 🔍 DEBUG: Log incoming request details
+        # === BƯỚC 1: GIỮ ẤM KẾT NỐI (FIX LỖI NETWORK ERROR) ===
+        # Gửi ngay một gói tin để trình duyệt và NGINX biết kết nối đang hoạt động
+        # trong khi chúng ta chờ các tác vụ nặng ở phía sau.
+        yield f"event: task_started\ndata: {json.dumps({'message': 'Request received, preparing analysis...'})}\n\n"
+        await asyncio.sleep(0.01) # Đảm bảo gói tin được gửi đi
+
+        # --- Giai đoạn 2: Khởi tạo & Phân tích (Logic cũ) ---
         print(f"🔍 STREAM REQUEST DEBUG:")
         print(f"   - Query: {query.query[:50]}...")
         print(f"   - User ID: {query.user_id}")
         print(f"   - Incoming session_id: {query.session_id}")
-        print(f"   - Force expert council: {query.force_expert_council}")
-        
-        # --- Giai đoạn 1: Khởi tạo & Phân tích ---
-        yield f"event: task_started\ndata: {json.dumps({'message': 'Request received, starting analysis...'})}\n\n"
-        
+
         user_context = await personalization_manager.get_user_context(query.user_id)
         
-        # 🔍 FIXED: Check if session already exists BEFORE creating
         if query.session_id:
-            print(f"🔄 Using existing session: {query.session_id}")
             session_id = query.session_id
             yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'Existing session restored.'})}\n\n"
         else:
-            print(f"🆕 Creating new session for user: {query.user_id}")
             session_id = await _get_or_create_session(query, user_context)
-            query.session_id = session_id
+            query.session_id = session_id # Cập nhật session_id vào query object
             yield f"event: session_ready\ndata: {json.dumps({'session_id': session_id, 'message': 'New session created.'})}\n\n"
         
-        print(f"✅ Final session_id: {session_id}")
+        print(f"✅ Final session_id for stream: {session_id}")
         
-        yield f"event: analysis_start\ndata: {json.dumps({'message': 'Performing semantic triage...'})}\n\n"
+        yield f"event: analysis_start\ndata: {json.dumps({'message': 'Performing semantic triage (can be slow on first load)...'})}\n\n"
         triage_result = await _intelligent_semantic_triage(query.query, user_context)
         routing_decision = _determine_intelligent_routing(triage_result, query.session_id)
         yield f"event: analysis_complete\ndata: {json.dumps({'category': triage_result['category'], 'routing': routing_decision['strategy']})}\n\n"
@@ -704,11 +703,11 @@ async def stream_aura_response(query: HealthQuery):
             yield f"event: knowledge_search\ndata: {json.dumps({'message': 'Searching medical knowledge base...'})}\n\n"
             rag_context = await rag_manager.get_context_for_query(query.query)
 
-        # --- Giai đoạn 2: Định tuyến đến luồng xử lý phù hợp ---
+        # --- Giai đoạn 3: Định tuyến đến luồng xử lý phù hợp ---
         strategy = routing_decision['strategy']
         print(f"🚦 Routing strategy: {strategy}")
 
-        if strategy in ['emergency_with_expert_analysis', 'direct_expert_council']:
+        if strategy in ['emergency_with_expert_analysis', 'direct_expert_council'] or query.force_expert_council:
             async for chunk in run_expert_council_stream(query, user_context, rag_context):
                 yield chunk
         
@@ -727,15 +726,15 @@ async def stream_aura_response(query: HealthQuery):
                 await asyncio.sleep(0.05)
     
     except Exception as e:
-        print(f"❌ STREAMING ERROR: {e}\n{traceback.format_exc()}")
+        print(f"❌ STREAMING ERROR in main generator: {e}\n{traceback.format_exc()}")
         error_info = {"error": "An unexpected error occurred during the stream.", "detail": str(e)}
         yield f"event: error\ndata: {json.dumps(error_info)}\n\n"
 
     finally:
-        # Gói tin cuối cùng: Luôn luôn gửi để báo hiệu kết thúc
         final_data = {'message': 'Stream finished.', 'session_id': session_id}
         yield f"event: stream_end\ndata: {json.dumps(final_data)}\n\n"
         print(f"🏁 Stream completed for session: {session_id}")
+
 
 # ==================== UTILITY FUNCTIONS ====================
 
