@@ -200,7 +200,7 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-@app.post("/api/chat")
+@app.post("/chat")
 async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
     """
     REFACTORED: Enhanced Chat Endpoint with consistent session management
@@ -849,7 +849,7 @@ async def _test_triage_health() -> Dict[str, Any]:
 
 # ==================== NEW/UPDATED ENDPOINTS ====================
 
-@app.options("/api/chat-stream")
+@app.options("/chat-stream")
 async def options_chat_stream():
     """Handle preflight requests for streaming endpoint"""
     return Response(
@@ -863,7 +863,7 @@ async def options_chat_stream():
     )
 
 # Update your streaming endpoint headers:
-@app.post("/api/chat-stream")
+@app.post("/chat-stream")
 async def chat_stream_endpoint(query: HealthQuery):
     """Enhanced streaming endpoint with proper CORS headers"""
     
@@ -927,17 +927,9 @@ async def handle_non_stream_chat(query: HealthQuery) -> Dict[str, Any]:
     # ... (phần code còn lại để thêm metadata vào response)
     return response
 
-@app.post("/api/chat")
-async def intelligent_chat_endpoint(query: HealthQuery) -> Dict[str, Any]:
-    """
-    Endpoint non-streaming cũ, giờ đây gọi một hàm xử lý riêng.
-    Rất hữu ích cho việc debug nội bộ.
-    """
-    return await handle_non_stream_chat(query)
-
 # ==================== EXISTING ENDPOINTS (UNCHANGED) ====================
 
-@app.post("/api/chat/continue")
+@app.post("/chat/continue")
 async def continue_session(continuation: SessionContinuation) -> Dict[str, Any]:
     """Continue an existing conversation session"""
     user_id = continuation.session_id.split("_")[-1] if "_" in continuation.session_id else "anonymous"
@@ -953,12 +945,12 @@ async def continue_session(continuation: SessionContinuation) -> Dict[str, Any]:
         rag_context
     )
 
-@app.get("/api/chat/session/{session_id}/history")
+@app.get("/chat/session/{session_id}/history")
 async def get_session_history(session_id: str) -> Dict[str, Any]:
     """Get complete session conversation history"""
     return await conversation_manager.get_session_history(session_id)
 
-@app.post("/api/feedback")
+@app.post("/feedback")
 async def log_user_feedback(feedback_request: FeedbackRequest) -> Dict[str, Any]:
     """Log user feedback for Human-in-the-Loop learning"""
     success = await personalization_manager.log_interaction_feedback(
@@ -979,17 +971,17 @@ async def log_user_feedback(feedback_request: FeedbackRequest) -> Dict[str, Any]
             "message": "Failed to log feedback"
         }
 
-@app.get("/api/analytics/feedback")
+@app.get("/analytics/feedback")
 async def get_feedback_analytics() -> Dict[str, Any]:
     """Get system feedback analytics for improvement insights"""
     return await personalization_manager.get_feedback_analytics()
 
-@app.get("/api/user/{user_id}/export")
+@app.get("/user/{user_id}/export")
 async def export_user_data(user_id: str) -> Dict[str, Any]:
     """Export all user data for privacy compliance"""
     return await personalization_manager.get_user_data_export(user_id)
 
-@app.delete("/api/user/{user_id}")
+@app.delete("/user/{user_id}")
 async def delete_user_account(user_id: str) -> Dict[str, Any]:
     """Delete user account and all associated data"""
     success = await personalization_manager.delete_user_data(user_id)
@@ -1006,7 +998,7 @@ async def delete_user_account(user_id: str) -> Dict[str, Any]:
             "message": "Failed to delete user data"
         }
 
-@app.get("/api/knowledge/search")
+@app.get("/knowledge/search")
 async def search_knowledge(query: str, limit: int = 3):
     """Direct knowledge search endpoint for testing"""
     results = await rag_manager.semantic_search(query, max_results=limit)
@@ -1016,7 +1008,7 @@ async def search_knowledge(query: str, limit: int = 3):
         "count": len(results)
     }
 
-@app.get("/api/services/status")
+@app.get("/services/status")
 async def services_status():
     """Check status of all microservices"""
     rag_health = await rag_manager.health_check()
@@ -1039,7 +1031,7 @@ async def services_status():
     }
 
 # Testing and debugging endpoints for LLM routing
-@app.get("/api/triage/test")
+@app.get("/triage/test")
 async def test_semantic_triage(query: str, context: str = ""):
     """Test intelligent semantic triage classification"""
     result = await _intelligent_semantic_triage(query, context)
@@ -1052,7 +1044,7 @@ async def test_semantic_triage(query: str, context: str = ""):
         "llm_driven": result.get("llm_driven", False)
     }
 
-@app.get("/api/triage/debug")
+@app.get("/triage/debug")
 async def debug_semantic_triage():
     """Debug semantic triage system with multiple test cases"""
     test_cases = [
@@ -1092,7 +1084,7 @@ async def debug_semantic_triage():
 
 # === EXPERT COUNCIL SESSION OBSERVABILITY ENDPOINTS (UNCHANGED) ===
 
-@app.get("/api/council-sessions/recent")
+@app.get("/council-sessions/recent")
 async def get_recent_council_sessions(
     limit: int = Query(default=10, description="Number of recent sessions to retrieve", ge=1, le=50),
     include_successful_only: bool = Query(default=False, description="Only include successful sessions")
@@ -1117,7 +1109,7 @@ async def get_recent_council_sessions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"A server error occurred while retrieving recent sessions: {str(e)}")
 
-@app.get("/api/council-sessions/{session_id}")
+@app.get("/council-sessions/{session_id}")
 async def get_council_session(session_id: str) -> Dict[str, Any]:
     """Retrieve specific Expert Council session for debugging and review"""
     session_data = await personalization_manager.get_council_session(session_id)
@@ -1131,7 +1123,7 @@ async def get_council_session(session_id: str) -> Dict[str, Any]:
         "retrieved_at": datetime.now(timezone.utc).isoformat()
     }
 
-@app.get("/api/analytics/council-performance")
+@app.get("/analytics/council-performance")
 async def get_council_performance_analytics(
     days: int = Query(default=30, description="Number of days to analyze", ge=1, le=365)
 ) -> Dict[str, Any]:
@@ -1144,7 +1136,7 @@ async def get_council_performance_analytics(
         "generated_at": datetime.now(timezone.utc).isoformat()
     }
 
-@app.get("/api/council-sessions/search")
+@app.get("/council-sessions/search")
 async def search_council_sessions(
     user_id: Optional[str] = Query(default=None, description="Filter by specific user ID"),
     success_only: bool = Query(default=False, description="Only successful sessions"),

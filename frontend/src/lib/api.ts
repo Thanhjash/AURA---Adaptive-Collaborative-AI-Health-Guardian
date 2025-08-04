@@ -141,7 +141,7 @@ export const api = {
   async healthCheck() {
     try {
       const response = await fetchWithTimeout(
-        `${API_BASE_URL}/health`,
+        `${API_BASE_URL}/api/health`,
         { 
           method: 'GET',
           headers: { 'Accept': 'application/json' }
