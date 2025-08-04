@@ -36,17 +36,14 @@ app = FastAPI(
 )
 
 ALLOWED_ORIGINS = [
-    "https://44-217-60-106.sslip.io",
-    # "https://api.44-217-60-106.sslip.io",   # không bắt buộc nhưng vô hại
-    "https://*.vercel.app",                 # preview build
-    "http://localhost:3000",                # FE dev
-    # "https://www.yourdomain.com",         # FE prod custom – thêm khi có
-    "https://aura-adaptive-collaborative-ai-heal.vercel.app/",
+    "https://44-217-60-106.sslip.io",                     # chính domain SSLIP
+    "https://aura-adaptive-collaborative-ai-heal.vercel.app",  # preview Vercel
+    "http://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,          # dùng list
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
