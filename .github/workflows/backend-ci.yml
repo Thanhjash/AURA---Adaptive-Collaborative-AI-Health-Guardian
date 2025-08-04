@@ -9,6 +9,7 @@ on:
 
 jobs:
   build-and-push:
+    if: false   # TẠM TẮT TOÀN BỘ WORKFLOW NÀY
     runs-on: ubuntu-latest
 
     steps:

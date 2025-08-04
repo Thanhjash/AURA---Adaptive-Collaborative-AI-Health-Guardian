@@ -1,12 +1,9 @@
-# services/ai_server/main.py
+# File: services/ai_server/main.py (VERSION V12 - PURE INFERENCE ENGINE)
+
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import os
-import asyncio
-import json
-import re
 from contextlib import asynccontextmanager
-import google.generativeai as genai
 
 # GGUF support
 try:
@@ -14,476 +11,126 @@ try:
     GGUF_AVAILABLE = True
 except ImportError:
     GGUF_AVAILABLE = False
-    print("⚠️ llama-cpp-python not installed. Install with: pip install llama-cpp-python")
+    print("⚠️ llama-cpp-python not installed. This service will not work.")
+    print("Install with: pip install llama-cpp-python")
 
-# Set cache directory
+# --- CONFIGURATION & GLOBALS ---
 os.environ['HF_HOME'] = '/app/.hf_cache'
 
-# Global model variables
 MEDGEMMA_MODEL = None
 MODEL_LOADED = False
 STARTUP_ERROR = None
-TRIAGE_CLIENT = None
 
-async def load_models():
-    global MEDGEMMA_MODEL, MODEL_LOADED, STARTUP_ERROR, TRIAGE_CLIENT
+# --- MODEL LOADING LOGIC ---
+async def load_gguf_model():
+    """Load MedGemma GGUF model once during server startup."""
+    global MEDGEMMA_MODEL, MODEL_LOADED, STARTUP_ERROR
     
+    if not GGUF_AVAILABLE:
+        STARTUP_ERROR = "llama-cpp-python is not installed."
+        MODEL_LOADED = False
+        return
+
     try:
-        if not GGUF_AVAILABLE:
-            raise ImportError("llama-cpp-python not available")
-            
-        print("🚀 Loading MedGemma GGUF (CPU optimized)...")
-        
-        # Download and load GGUF model
+        print("🚀 [AI-SERVER] Loading MedGemma GGUF (CPU optimized)...")
         model_path = "/app/.hf_cache/medgemma-4b-it-Q4_K_M.gguf"
-        model_repo = "unsloth/medgemma-4b-it-GGUF"
         
-        # Check if model exists locally, if not download
         if not os.path.exists(model_path):
-            print("📥 Downloading GGUF model...")
+            print(f"📥 [AI-SERVER] Model not found at {model_path}. Downloading...")
             from huggingface_hub import hf_hub_download
-            
             model_path = hf_hub_download(
-                repo_id=model_repo,
+                repo_id="unsloth/medgemma-4b-it-GGUF",
                 filename="medgemma-4b-it-Q4_K_M.gguf",
                 cache_dir="/app/.hf_cache"
             )
-            print(f"✅ Model downloaded to: {model_path}")
+            print("✅ [AI-SERVER] Model download complete.")
         
-        # Load GGUF model with optimized settings for CPU
-        print("🔬 Loading GGUF model...")
+        print("🔬 [AI-SERVER] Initializing Llama model...")
         MEDGEMMA_MODEL = Llama(
             model_path=model_path,
-            n_ctx=2048,  # Context window
-            n_batch=512,  # Batch size for prompt processing
-            n_threads=None,  # Use all available CPU threads
+            n_ctx=2048,
+            n_batch=512,
+            n_threads=None,  # Auto-use all CPU cores
             verbose=False,
-            use_mmap=True,  # Memory mapping for efficiency
-            use_mlock=False,  # Don't lock memory pages
-            n_gpu_layers=0  # CPU only (set to -1 for GPU if available)
+            use_mmap=True,
+            n_gpu_layers=0  # CPU-only
         )
-        
-        print("✅ MedGemma GGUF loaded successfully")        
-        print(f"📊 Model ready for CPU inference")
-        
         MODEL_LOADED = True
-        
-        # Initialize Gemini for intelligent triage
-        try:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-            if not api_key:
-                print("⚠️ GOOGLE_API_KEY not found - triage will use fallback only")
-                TRIAGE_CLIENT = None
-            else:
-                genai.configure(api_key=api_key)
-                TRIAGE_CLIENT = genai.GenerativeModel('gemini-2.0-flash-exp')
-                print("✅ Gemini triage client initialized")
-        except Exception as e:
-            print(f"⚠️ Gemini triage setup failed: {e}")
-            TRIAGE_CLIENT = None
+        print("✅ [AI-SERVER] MedGemma GGUF loaded successfully.")
         
     except Exception as e:
-        print(f"❌ Failed to load MedGemma GGUF: {e}")
         STARTUP_ERROR = str(e)
         MODEL_LOADED = False
+        print(f"❌ [AI-SERVER] CRITICAL ERROR during model loading: {e}")
 
+# --- APP LIFECYCLE ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print("🔄 Starting AI Server (GGUF)...")
-    await load_models()
+    await load_gguf_model()
     yield
-    # Shutdown
-    print("🔄 Shutting down AI Server...")
+    print("🔄 [AI-SERVER] Shutting down.")
 
+# --- APP INITIALIZATION ---
 app = FastAPI(
-    title="AURA AI Server (GGUF)", 
-    version="2.1.0",
+    title="AURA AI Server (Pure GGUF Inference)", 
+    version="3.0.0",
     lifespan=lifespan
 )
 
-class VQARequest(BaseModel):
-    image_url: str
-    question: str
+# --- REQUEST MODEL ---
+class GenerateRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 250
+    temperature: float = 0.7
+    stop: list[str] = ["<|im_end|>", "\n\n"]
 
-class WellnessRequest(BaseModel):
-    message: str
+# --- MAIN ENDPOINT ---
+@app.post("/generate")
+async def generate_text(request: GenerateRequest):
+    """
+    Pure inference endpoint: receives prompt, returns MedGemma-generated text.
+    This is the single 'muscle' endpoint of this server.
+    """
+    if not MODEL_LOADED:
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Model not loaded. Error: {STARTUP_ERROR}"
+        )
+    
+    try:
+        print(f"🔍 [AI-SERVER] Generation request: {request.prompt[:100]}...")
+        
+        response = MEDGEMMA_MODEL(
+            request.prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            stop=request.stop,
+            echo=False,
+            repeat_penalty=1.1
+        )
+        
+        generated_text = response['choices'][0]['text'].strip()
+        print("✅ [AI-SERVER] Generation successful.")
+        return {"response": generated_text, "model": "MedGemma-GGUF"}
 
-class TriageQuery(BaseModel):
-    query: str
-    context: str = ""
+    except Exception as e:
+        print(f"❌ [AI-SERVER] Generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
+# --- UTILITY ENDPOINTS ---
 @app.get("/")
 async def root():
     return {
-        "service": "AURA AI Server (GGUF)", 
-        "status": "operational",
+        "service": "AURA AI Server (Pure GGUF Inference)", 
+        "status": "operational" if MODEL_LOADED else "error",
         "model_loaded": MODEL_LOADED,
-        "model_type": "GGUF (CPU optimized)",
-        "triage_available": TRIAGE_CLIENT is not None,
-        "capabilities": ["Medical VQA", "Wellness Analysis", "Intelligent Triage"]
     }
 
 @app.get("/health")
 async def health():
     return {
-        "status": "healthy" if MODEL_LOADED else "loading",
-        "models_loaded": MODEL_LOADED,
-        "model_format": "GGUF",
+        "status": "healthy" if MODEL_LOADED else "unhealthy",
+        "model_loaded": MODEL_LOADED,
         "inference_device": "CPU",
-        "triage_client_ready": TRIAGE_CLIENT is not None,
         "startup_error": STARTUP_ERROR,
-        "gguf_available": GGUF_AVAILABLE
     }
-
-@app.post("/ai/triage")
-async def intelligent_triage(request: TriageQuery):
-    """
-    LLM-driven intelligent query classification
-    Replaces all fixed keyword-based routing with adaptive AI decision making
-    """
-    
-    if not TRIAGE_CLIENT:
-        # Fallback to conservative classification if Gemini unavailable
-        return _conservative_fallback_triage(request.query)
-    
-    # Enhanced triage prompt for medical context understanding
-    triage_prompt = f"""You are an expert medical triage specialist with deep understanding of patient communication patterns and healthcare workflow optimization. Analyze this user query with full contextual awareness.
-
-USER QUERY: "{request.query}"
-
-ADDITIONAL CONTEXT: {request.context if request.context else "No additional context provided"}
-
-CLASSIFICATION TASK: Determine the most appropriate category for this query based on medical urgency, complexity, care requirements, and optimal patient flow.
-
-CATEGORIES:
-- "simple_chitchat": Non-medical conversation, greetings, general questions unrelated to health
-- "medical_query_low_priority": Single symptoms without red flags, general wellness questions, lifestyle advice, non-urgent concerns that benefit from progressive consultation
-- "medical_query_high_priority": Complex symptoms, multiple concerning symptoms, specific medical conditions requiring specialist attention, persistent/worsening symptoms
-- "medical_emergency": Life-threatening symptoms, severe acute conditions, situations requiring immediate medical intervention
-
-ROUTING PHILOSOPHY - MULTI-PERSPECTIVE ANALYSIS:
-
-**From Patient Experience Perspective:**
-- Simple symptoms deserve empathetic progressive consultation, not overwhelming expert analysis
-- Complex cases benefit from comprehensive expert review
-- Emergency situations need immediate recognition and guidance
-
-**From Clinical Workflow Perspective:**
-- Single, mild symptoms (headache, minor pain, general fatigue) → Progressive consultation builds context
-- Multiple symptoms, severe symptoms, or red flag indicators → Expert council for comprehensive analysis
-- True emergencies → Immediate emergency guidance
-
-**From System Resource Perspective:**
-- Reserve expert council for cases that truly benefit from multi-specialist analysis
-- Use progressive consultation to gather context before escalating
-- Optimize routing based on complexity, not just medical keywords
-
-CLASSIFICATION GUIDELINES:
-
-**medical_query_low_priority** (Progressive Consultation First):
-- Single common symptoms without severity indicators: "headache", "tired", "minor pain"
-- General wellness questions: "vitamins", "exercise", "nutrition"
-- Vague concerns: "not feeling well", "something feels off"
-- Lifestyle questions: "sleep better", "stress management"
-
-**medical_query_high_priority** (Expert Council Appropriate):
-- Multiple concerning symptoms: "headache + vision changes + nausea"
-- Symptoms with red flag descriptors: "severe", "sudden onset", "worst ever"
-- Specific medical conditions: "diabetes management", "medication interactions"
-- Persistent/worsening symptoms: "pain getting worse", "symptoms for weeks"
-
-**medical_emergency** (Immediate Emergency Guidance):
-- Chest pain + breathing difficulty
-- Severe neurological symptoms: sudden weakness, severe headache
-- Loss of consciousness, seizures
-- Severe bleeding, trauma
-
-CRITICAL INSTRUCTIONS:
-1. Analyze symptom COMPLEXITY and SEVERITY, not just medical keywords
-2. Consider patient journey - simple symptoms should start with progressive consultation
-3. Reserve high-priority routing for cases that truly need specialist analysis
-4. Be conservative with emergency classification - only clear emergencies
-5. Return ONLY a valid JSON object with this exact structure:
-
-{{
-    "category": "exact_category_name",
-    "confidence": 0.95,
-    "reasoning": "Clear explanation focusing on routing rationale and patient flow optimization",
-    "urgency_score": 0.85,
-    "medical_indicators": ["specific", "clinical", "indicators", "identified"],
-    "recommended_flow": "progressive_consultation|expert_council|emergency_referral",
-    "routing_rationale": "Why this routing serves the patient best from workflow perspective"
-}}
-
-Analyze the query with optimal patient flow in mind and respond with ONLY the JSON object."""
-
-    try:
-        # Generate intelligent classification using Gemini
-        response = TRIAGE_CLIENT.generate_content(triage_prompt)
-        
-        # Parse structured response
-        triage_result = _parse_triage_response(response.text)
-        
-        if not triage_result:
-            print("⚠️ Failed to parse triage response, using fallback")
-            return _conservative_fallback_triage(request.query)
-        
-        # Add metadata
-        triage_result["triage_model"] = "gemini-2.0-flash-exp"
-        triage_result["query_length"] = len(request.query)
-        triage_result["has_context"] = bool(request.context)
-        triage_result["llm_driven"] = True
-        
-        print(f"🎯 Intelligent triage: {triage_result['category']} (confidence: {triage_result['confidence']:.2f})")
-        
-        return triage_result
-        
-    except Exception as e:
-        print(f"❌ Triage generation failed: {e}")
-        return _conservative_fallback_triage(request.query)
-
-def _parse_triage_response(response_text: str):
-    """Parse LLM triage response with multiple parsing strategies"""
-    
-    if not response_text:
-        return None
-    
-    # Strategy 1: Look for JSON code blocks
-    json_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', response_text, re.DOTALL | re.IGNORECASE)
-    if json_block_match:
-        try:
-            return json.loads(json_block_match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-    
-    # Strategy 2: Find balanced JSON object
-    brace_count = 0
-    start_idx = response_text.find('{')
-    if start_idx == -1:
-        return None
-    
-    in_string = False
-    escape_next = False
-    
-    for i, char in enumerate(response_text[start_idx:], start_idx):
-        if escape_next:
-            escape_next = False
-            continue
-            
-        if char == '\\':
-            escape_next = True
-            continue
-            
-        if char == '"' and not escape_next:
-            in_string = not in_string
-            continue
-            
-        if not in_string:
-            if char == '{':
-                brace_count += 1
-            elif char == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    json_str = response_text[start_idx:i+1]
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        break
-    
-    # Strategy 3: Extract category if mentioned explicitly
-    categories = ["simple_chitchat", "medical_query_low_priority", "medical_query_high_priority", "medical_emergency"]
-    for category in categories:
-        if category in response_text.lower():
-            return {
-                "category": category,
-                "confidence": 0.7,
-                "reasoning": "Extracted category from partial response",
-                "urgency_score": 0.5,
-                "medical_indicators": [],
-                "recommended_flow": "progressive_consultation",
-                "semantic_analysis": "Partial parsing recovery"
-            }
-    
-    return None
-
-def _conservative_fallback_triage(query: str):
-    """
-    Conservative fallback classification when LLM triage unavailable
-    Uses basic pattern recognition as last resort
-    """
-    query_lower = query.lower()
-    
-    # Emergency patterns (high specificity required)
-    emergency_patterns = [
-        "can't breathe", "cannot breathe", "difficulty breathing", "severe pain",
-        "crushing pain", "heart attack", "stroke", "unconscious", "bleeding heavily",
-        "severe chest pain", "can't catch my breath"
-    ]
-    
-    if any(pattern in query_lower for pattern in emergency_patterns):
-        return {
-            "category": "medical_emergency",
-            "confidence": 0.6,
-            "reasoning": "Emergency patterns detected - conservative fallback",
-            "urgency_score": 0.9,
-            "medical_indicators": ["emergency_language_patterns"],
-            "recommended_flow": "emergency_referral",
-            "semantic_analysis": "Pattern-based emergency detection",
-            "fallback": True
-        }
-    
-    # High-priority medical patterns
-    medical_patterns = [
-        "chest pain", "chest tight", "chest pressure", "shortness of breath",
-        "dizzy", "dizziness", "nausea", "fever", "headache", "pain",
-        "symptom", "feel sick", "not feeling well"
-    ]
-    
-    if any(pattern in query_lower for pattern in medical_patterns):
-        return {
-            "category": "medical_query_high_priority", 
-            "confidence": 0.5,
-            "reasoning": "Medical symptom patterns detected - conservative fallback",
-            "urgency_score": 0.7,
-            "medical_indicators": ["symptom_language_patterns"],
-            "recommended_flow": "expert_council",
-            "semantic_analysis": "Pattern-based medical detection",
-            "fallback": True
-        }
-    
-    # Greeting and chitchat patterns
-    chitchat_patterns = ["hello", "hi", "how are you", "good morning", "good day", "thanks", "thank you"]
-    
-    if any(pattern in query_lower for pattern in chitchat_patterns) and len(query.split()) <= 5:
-        return {
-            "category": "simple_chitchat",
-            "confidence": 0.8,
-            "reasoning": "Greeting patterns detected - conservative fallback", 
-            "urgency_score": 0.1,
-            "medical_indicators": [],
-            "recommended_flow": "simple_response",
-            "semantic_analysis": "Pattern-based greeting detection",
-            "fallback": True
-        }
-    
-    # Default conservative classification for unknown queries
-    return {
-        "category": "medical_query_low_priority",
-        "confidence": 0.4,
-        "reasoning": "Unknown query type - conservative medical classification",
-        "urgency_score": 0.5,
-        "medical_indicators": [],
-        "recommended_flow": "progressive_consultation",
-        "semantic_analysis": "Default conservative classification",
-        "fallback": True
-    }
-
-def _generate_response(prompt: str, max_tokens: int = 150, temperature: float = 0.7):
-    """Generate response using GGUF model with better parameters"""
-    if not MODEL_LOADED:
-        raise HTTPException(503, f"Model not loaded. Error: {STARTUP_ERROR}")
-    
-    try:
-        print(f"🔍 Generation request - Prompt: {prompt[:100]}...")
-        
-        # Generate response with GGUF model
-        response = MEDGEMMA_MODEL(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=0.9,
-            echo=False,  # Don't repeat the prompt
-            stop=["<|im_end|>", "\n\n\n"],  # Better stop tokens for MedGemma
-            repeat_penalty=1.1
-        )
-        
-        generated_text = response['choices'][0]['text'].strip()
-        print(f"✅ Generated {len(generated_text)} characters")
-        
-        # If empty, try without stop tokens
-        if not generated_text:
-            print("⚠️ Empty response, retrying without stop tokens...")
-            response = MEDGEMMA_MODEL(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.9,
-                echo=False,
-                stop=[],  # No stop tokens
-                repeat_penalty=1.1
-            )
-            generated_text = response['choices'][0]['text'].strip()
-            print(f"🔄 Retry generated {len(generated_text)} characters")
-        
-        return generated_text
-        
-    except Exception as e:
-        print(f"❌ Generation error: {e}")
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-@app.post("/ai/wellness")
-async def mental_wellness(request: WellnessRequest):
-    # Better prompt format for MedGemma
-    prompt = f"""<|im_start|>system
-You are a compassionate mental health professional providing supportive guidance.
-<|im_end|>
-<|im_start|>user
-{request.message}
-<|im_end|>
-<|im_start|>assistant
-"""
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=250, temperature=0.8)
-        return {"response": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-@app.post("/ai/vqa")
-async def medical_vqa(request: VQARequest):
-    # Better prompt format for MedGemma
-    prompt = f"""<|im_start|>system
-You are a medical imaging specialist providing professional medical assessments.
-<|im_end|>
-<|im_start|>user
-Analyze this image and answer: {request.question}
-<|im_end|>
-<|im_start|>assistant
-"""
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=200, temperature=0.7)
-        return {"answer": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-
-
-@app.post("/ai/vqa")
-async def medical_vqa(request: VQARequest):
-    prompt = f"As a medical imaging specialist, analyze this image and answer: {request.question}\n\nProvide a clear, professional medical assessment.\n\nResponse:"
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=200, temperature=0.7)
-        return {"answer": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-@app.post("/ai/wellness")
-async def mental_wellness(request: WellnessRequest):
-    prompt = f"As a compassionate mental health professional, provide supportive guidance for: {request.message}\n\nRespond with empathy and practical advice.\n\nResponse:"
-    
-    try:
-        answer = _generate_response(prompt, max_tokens=250, temperature=0.8)
-        return {"response": answer, "model": "MedGemma-GGUF"}
-        
-    except Exception as e:
-        raise HTTPException(500, f"Generation failed: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
