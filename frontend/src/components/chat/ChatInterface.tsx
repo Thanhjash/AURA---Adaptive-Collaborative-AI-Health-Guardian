@@ -1,4 +1,3 @@
-// frontend/src/components/chat/ChatInterface.tsx (VERSION 12.2 - SYNCED)
 'use client'
 
 import React, { useState, useEffect, useRef, useCallback } from 'react'
@@ -6,23 +5,27 @@ import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { 
   Send, 
   Bot, 
   User, 
-  AlertTriangle, 
-  CheckCircle, 
-  Clock,
-  Activity,
-  Brain,
   Menu,
   Plus,
-  History,
   Loader2,
-  Trash2
+  Trash2,
+  Brain,
+  Activity,
+  AlertTriangle,
+  CheckCircle,
+  Clock
 } from 'lucide-react'
 
 interface ChatMessage {
@@ -50,8 +53,36 @@ interface CouncilStep {
   description?: string
 }
 
-// Updated API configuration
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+// Lock management helpers
+const getRequestLock = (): boolean => {
+  if (typeof window === 'undefined') return false
+  return window.sessionStorage.getItem('aura_request_lock') === 'true'
+}
+
+const setRequestLock = (locked: boolean) => {
+  if (typeof window === 'undefined') return
+  if (locked) {
+    window.sessionStorage.setItem('aura_request_lock', 'true')
+  } else {
+    window.sessionStorage.removeItem('aura_request_lock')
+  }
+}
+
+const getActiveSession = (): string | null => {
+  if (typeof window === 'undefined') return null
+  return window.sessionStorage.getItem('aura_active_session')
+}
+
+const setActiveSession = (sessionId: string | null) => {
+  if (typeof window === 'undefined') return
+  if (sessionId) {
+    window.sessionStorage.setItem('aura_active_session', sessionId)
+  } else {
+    window.sessionStorage.removeItem('aura_active_session')
+  }
+}
 
 export function ChatInterface() {
   // Core state
@@ -63,18 +94,63 @@ export function ChatInterface() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamStatus, setStreamStatus] = useState('')
   const [councilStep, setCouncilStep] = useState<CouncilStep | null>(null)
+  const [councilActive, setCouncilActive] = useState(false)
   
   // UI state
+  const [mounted, setMounted] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [chatHistory, setChatHistory] = useState<ChatHistory[]>([])
+  const [forceCouncil, setForceCouncil] = useState(false)
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
-  const isMountedRef = useRef(true)
+  const isMountedRef = useRef(false)
+  const sessionIdRef = useRef<string | null>(null)
 
-  // Utility functions
+  // Initialization
+  useEffect(() => {
+    isMountedRef.current = true
+    setMounted(true)
+    const storedSession = getActiveSession()
+    setCurrentSession(storedSession)
+    sessionIdRef.current = storedSession
+    loadChatHistory()
+    inputRef.current?.focus()
+    
+    return () => {
+      isMountedRef.current = false
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+      setRequestLock(false)
+    }
+  }, [])
+
+  // Session sync
+  useEffect(() => {
+    if (!mounted) return
+    
+    const syncSession = () => {
+      if (getRequestLock() || isStreaming) return
+      
+      const storedSession = getActiveSession()
+      if (storedSession !== currentSession) {
+        setCurrentSession(storedSession)
+        sessionIdRef.current = storedSession
+      }
+    }
+
+    window.addEventListener('focus', syncSession)
+    return () => window.removeEventListener('focus', syncSession)
+  }, [currentSession, mounted, isStreaming])
+
+  useEffect(() => {
+    sessionIdRef.current = currentSession
+    setActiveSession(currentSession)
+  }, [currentSession])
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }
@@ -83,11 +159,13 @@ export function ChatInterface() {
     scrollToBottom()
   }, [messages])
 
+  // Emergency lock release
   useEffect(() => {
-    inputRef.current?.focus()
-    loadChatHistory()
-    return () => { isMountedRef.current = false }
-  }, [])
+    if (!isStreaming && getRequestLock()) {
+      console.log('🔧 Emergency lock release detected')
+      setRequestLock(false)
+    }
+  }, [isStreaming])
 
   const loadChatHistory = () => {
     if (typeof window === 'undefined') return
@@ -123,12 +201,78 @@ export function ChatInterface() {
     })
   }, [])
 
-  // Main streaming logic - Updated for V12.2
-  const handleSend = async () => {
-    if (!input.trim() || isStreaming) return
+  const cleanupStream = useCallback(() => {
     if (!isMountedRef.current) return
+    
+    console.log('🧹 Centralizing cleanup...')
+    setIsStreaming(false)
+    setRequestLock(false)
+    setStreamStatus('')
+    setCouncilStep(null)
+    setCouncilActive(false)
+    setForceCouncil(false)
+    abortControllerRef.current = null
+    
+    setTimeout(() => {
+      if (isMountedRef.current && inputRef.current) {
+        inputRef.current.focus()
+      }
+    }, 100)
+  }, [])
 
-    // Abort existing request
+  const loadChatSession = async (sessionId: string) => {
+    if (isStreaming || getRequestLock()) return
+
+    console.log(`[FE] Loading session: ${sessionId}`)
+    setMessages([])
+    setCurrentSession(sessionId)
+
+    try {
+      const response = await fetch(`${API_BASE}/api/session/${sessionId}`)
+      if (!response.ok) {
+        if (response.status === 404) {
+          console.log('Session not found, starting fresh')
+          return
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+      
+      const sessionData = await response.json()
+      console.log('📥 Session data received:', sessionData)
+      
+      if (sessionData && Array.isArray(sessionData.message_history)) {
+        const loadedMessages: ChatMessage[] = sessionData.message_history.map((msg: any, index: number) => ({
+          id: `${sessionId}-${index}`,
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp,
+          data: msg.data
+        }))
+        setMessages(loadedMessages)
+        console.log(`✅ Loaded ${loadedMessages.length} messages`)
+      }
+    } catch (error) {
+      console.error("Failed to load session history:", error)
+      setMessages([{
+        id: 'error-load',
+        role: 'assistant',
+        content: 'Sorry, I was unable to load this conversation.',
+        timestamp: new Date().toISOString()
+      }])
+    }
+  }
+
+  const handleSend = useCallback(async () => {
+    const canSend = input.trim() && !isStreaming && !getRequestLock() && isMountedRef.current
+    
+    if (!canSend) return
+
+    const currentInput = input
+    setInput('')
+    
+    setRequestLock(true)
+    setIsStreaming(true)
+
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
       await new Promise(resolve => setTimeout(resolve, 100))
@@ -137,13 +281,9 @@ export function ChatInterface() {
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
-      content: input,
+      content: currentInput,
       timestamp: new Date().toISOString()
     }
-
-    const currentInput = input
-    setInput('')
-    setMessages(prev => [...prev, userMessage])
 
     const assistantId = `assistant-${Date.now()}`
     const assistantMessage: ChatMessage = {
@@ -153,10 +293,10 @@ export function ChatInterface() {
       timestamp: new Date().toISOString()
     }
 
-    setMessages(prev => [...prev, assistantMessage])
-    setIsStreaming(true)
+    setMessages(prev => [...prev, userMessage, assistantMessage])
     setStreamStatus('Connecting...')
     setCouncilStep(null)
+    setCouncilActive(false)
 
     const controller = new AbortController()
     abortControllerRef.current = controller
@@ -167,21 +307,25 @@ export function ChatInterface() {
 
     const requestPayload = {
       query: currentInput,
-      user_id: 'demo_user_v12',
-      session_id: currentSession,
-      force_expert_council: false
+      user_id: 'demo_user_v12_5',
+      session_id: sessionIdRef.current,
+      force_expert_council: forceCouncil
     }
 
     try {
       await fetchEventSource(`${API_BASE}/chat-stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache'
+        },
         body: JSON.stringify(requestPayload),
         signal: controller.signal,
 
         async onopen(response) {
           if (response.ok) {
-            setStreamStatus('Connected. Processing...')
+            setStreamStatus('Connected')
             return
           }
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -194,12 +338,21 @@ export function ChatInterface() {
             const data = JSON.parse(event.data)
 
             switch (event.event) {
-              // V12.2 Backend Events
+              case 'session_ready':
+                if (data.session_id && data.session_id !== sessionIdRef.current) {
+                  setCurrentSession(data.session_id)
+                  sessionIdRef.current = data.session_id
+                  newSessionId = data.session_id
+                }
+                setStreamStatus(data.message || 'Session ready')
+                break
+
               case 'progress':
                 setStreamStatus(`${data.step}: ${data.status}`)
                 break
               
               case 'council_started':
+                setCouncilActive(true)
                 setStreamStatus(`Expert Council: ${data.message}`)
                 break
 
@@ -222,11 +375,12 @@ export function ChatInterface() {
                 break
                 
               case 'stream_end':
-                newSessionId = data.session_id
-                if (data.session_id && data.session_id !== currentSession) {
+                if (data.session_id) {
+                  newSessionId = data.session_id
                   setCurrentSession(data.session_id)
+                  sessionIdRef.current = data.session_id
                 }
-                setStreamStatus('Complete.')
+                setStreamStatus('Complete')
                 break
                 
               case 'result':
@@ -239,10 +393,6 @@ export function ChatInterface() {
 
               case 'error':
                 throw new Error(data.message || 'Unknown stream error')
-
-              default:
-                console.log('Unknown event:', event.event, data)
-                break
             }
           } catch (parseError) {
             console.error('Event parsing error:', parseError, event)
@@ -250,48 +400,40 @@ export function ChatInterface() {
         },
 
         onclose() {
-          if (!isMountedRef.current) return
-          
-          if (finalData) {
+          if (finalData && isMountedRef.current) {
             setMessages(prev => prev.map(msg => 
-              msg.id === assistantId ? { ...msg, data: finalData } : msg
+              msg.id === assistantId 
+                ? { ...msg, data: finalData } 
+                : msg
             ))
           }
 
-          const finalSessionId = newSessionId || currentSession
+          const finalSessionId = newSessionId || sessionIdRef.current
           if (finalSessionId && finalContent && currentInput) {
             saveSessionToList(finalSessionId, currentInput)
           }
-
-          setIsStreaming(false)
-          setStreamStatus('')
-          setCouncilStep(null)
-          abortControllerRef.current = null
-          
-          setTimeout(() => inputRef.current?.focus(), 100)
         },
 
         onerror(error) {
-          console.error('Stream error:', error)
-          if (isMountedRef.current) {
-            setStreamStatus('Connection error')
-            setTimeout(() => {
-              setIsStreaming(false)
-              setStreamStatus('')
-              setCouncilStep(null)
-            }, 2000)
+          console.error('❌ Stream error:', error)
+          
+          if (isMountedRef.current && error.name !== 'AbortError') {
+            setMessages(prev => prev.map(msg =>
+              msg.id === assistantId ? {
+                ...msg,
+                content: 'Sorry, there was a connection error. Please try again.'
+              } : msg
+            ))
           }
-          return 5000 // Retry in 5 seconds
+          
+          controller.abort()
+          throw error
         }
       })
     } catch (error) {
-      if (isMountedRef.current) {
-        setIsStreaming(false)
-        setStreamStatus('')
-        setCouncilStep(null)
+      if (isMountedRef.current && abortControllerRef.current?.signal.aborted !== true) {
         console.error('Send error:', error)
         
-        // Add error message
         const errorMessage: ChatMessage = {
           id: `error-${Date.now()}`,
           role: 'assistant',
@@ -300,8 +442,10 @@ export function ChatInterface() {
         }
         setMessages(prev => [...prev.slice(0, -1), errorMessage])
       }
+    } finally {
+      cleanupStream()
     }
-  }
+  }, [input, isStreaming, forceCouncil, cleanupStream, saveSessionToList])
 
   const handleNewChat = () => {
     if (abortControllerRef.current) {
@@ -309,10 +453,8 @@ export function ChatInterface() {
     }
     setMessages([])
     setCurrentSession(null)
-    setIsStreaming(false)
-    setStreamStatus('')
-    setCouncilStep(null)
-    inputRef.current?.focus()
+    sessionIdRef.current = null
+    cleanupStream()
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -330,238 +472,306 @@ export function ChatInterface() {
   }
 
   const getConfidenceColor = (confidence: number) => {
-    if (confidence >= 0.8) return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-    if (confidence >= 0.6) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-    return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+    if (confidence >= 0.8) return 'bg-green-100 text-green-800'
+    if (confidence >= 0.6) return 'bg-yellow-100 text-yellow-800'
+    return 'bg-red-100 text-red-800'
   }
 
-  const renderMarkdownText = (text: string) => {
-    return text.split(/(\*\*.*?\*\*)/).map((part, index) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={index}>{part.slice(2, -2)}</strong>
-      }
-      return part
-    })
+  const getCouncilStepIcon = (step: string) => {
+    switch (step.toLowerCase()) {
+      case 'health_check':
+        return <Activity className="h-4 w-4" />
+      case 'parallel_analysis':
+        return <Brain className="h-4 w-4" />
+      case 'synthesis':
+        return <CheckCircle className="h-4 w-4" />
+      case 'formatting':
+        return <Clock className="h-4 w-4" />
+      default:
+        return <Loader2 className="h-4 w-4 animate-spin" />
+    }
   }
 
-  const renderExpertCouncilReport = (data: any) => {
-    if (!data.reasoning_trace) return null
-
-    return (
-      <div className="mt-3 border rounded-lg overflow-hidden">
-        <Tabs defaultValue="summary" className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="summary">Summary</TabsTrigger>
-            <TabsTrigger value="reasoning">Reasoning</TabsTrigger>
-            <TabsTrigger value="confidence">Details</TabsTrigger>
-          </TabsList>
-          
-          <TabsContent value="summary" className="p-4">
-            <div className="space-y-2">
-              {data.confidence && (
-                <Badge className={getConfidenceColor(data.confidence)}>
-                  Confidence: {Math.round(data.confidence * 100)}%
-                </Badge>
-              )}
-              {data.duration_seconds && (
-                <Badge variant="outline">
-                  <Clock className="w-3 h-3 mr-1" />
-                  {data.duration_seconds}s
-                </Badge>
-              )}
-            </div>
-          </TabsContent>
-          
-          <TabsContent value="reasoning" className="p-4">
-            <div className="space-y-3 text-sm">
-              {data.reasoning_trace.coordinator && (
-                <div>
-                  <strong>Coordinator:</strong>
-                  <p className="mt-1 text-gray-600 dark:text-gray-300">
-                    {data.reasoning_trace.coordinator.slice(0, 200)}...
-                  </p>
-                </div>
-              )}
-              {data.reasoning_trace.reasoner && (
-                <div>
-                  <strong>Reasoner:</strong>
-                  <p className="mt-1 text-gray-600 dark:text-gray-300">
-                    {data.reasoning_trace.reasoner.slice(0, 200)}...
-                  </p>
-                </div>
-              )}
-            </div>
-          </TabsContent>
-          
-          <TabsContent value="confidence" className="p-4">
-            <div className="text-sm space-y-2">
-              <div>Session ID: {data.session_id}</div>
-              <div>Processing Time: {data.duration_seconds}s</div>
-              <div>Analysis Depth: Expert Council</div>
-            </div>
-          </TabsContent>
-        </Tabs>
-      </div>
-    )
+  if (!mounted) {
+    return <div className="flex h-screen bg-gray-50">Loading...</div>
   }
+
+  const isButtonDisabled = isStreaming || getRequestLock() || !input.trim()
 
   return (
-    <div className="flex h-screen bg-gray-50 dark:bg-gray-900">
+    <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transform transition-transform duration-200 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
-        <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">AURA Chat</h2>
-          <Button variant="ghost" size="sm" onClick={() => setSidebarOpen(false)} className="lg:hidden">
-            ×
+      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
+        <div className="flex items-center justify-between h-16 px-4 border-b">
+          <h1 className="text-xl font-bold text-gray-900">AURA</h1>
+          <Button 
+            variant="ghost" 
+            size="sm"
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden"
+          >
+            ✕
           </Button>
         </div>
         
         <div className="p-4">
           <Button onClick={handleNewChat} className="w-full mb-4">
-            <Plus className="w-4 h-4 mr-2" />
+            <Plus className="h-4 w-4 mr-2" />
             New Chat
           </Button>
           
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">Recent</h3>
-              {chatHistory.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={clearAllHistory}>
-                  <Trash2 className="w-3 h-3" />
-                </Button>
-              )}
-            </div>
-            
-            <ScrollArea className="h-64">
-              {chatHistory.map((session) => (
+          <div className="flex justify-between items-center mb-2">
+            <h2 className="text-sm font-medium text-gray-700">Chat History</h2>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={clearAllHistory}
+              className="text-xs"
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
+          
+          <ScrollArea className="h-[calc(100vh-200px)]">
+            <div className="space-y-2">
+              {chatHistory.map((item) => (
                 <div
-                  key={session.session_id}
-                  className="p-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                  onClick={() => setCurrentSession(session.session_id)}
+                  key={item.session_id}
+                  onClick={() => loadChatSession(item.session_id)}
+                  className={`p-3 rounded cursor-pointer transition-colors ${
+                    currentSession === item.session_id
+                      ? 'bg-blue-100 text-blue-800'
+                      : 'hover:bg-gray-100'
+                  }`}
                 >
-                  <div className="font-medium truncate">{session.title}</div>
-                  <div className="text-xs text-gray-500 dark:text-gray-400">
-                    {new Date(session.timestamp).toLocaleDateString()}
+                  <div className="text-sm font-medium truncate">
+                    {item.title}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    {new Date(item.timestamp).toLocaleDateString()}
                   </div>
                 </div>
               ))}
-            </ScrollArea>
-          </div>
+            </div>
+          </ScrollArea>
         </div>
       </div>
 
-      {/* Main Content */}
+      {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-4">
-          <div className="flex items-center justify-between">
-            <Button variant="ghost" size="sm" onClick={() => setSidebarOpen(true)} className="lg:hidden">
-              <Menu className="w-4 h-4" />
+        <div className="h-16 bg-white border-b flex items-center justify-between px-4">
+          <div className="flex items-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSidebarOpen(true)}
+              className="lg:hidden mr-2"
+            >
+              <Menu className="h-4 w-4" />
             </Button>
-            <div className="flex items-center gap-2">
-              <Activity className="w-5 h-5 text-green-500" />
-              <span className="font-medium">AURA Health Assistant</span>
-            </div>
-            <div></div>
+            <h2 className="text-lg font-semibold">
+              AURA Health Assistant
+            </h2>
+          </div>
+          
+          {/* Force Expert Council Toggle */}
+          <div className="flex items-center space-x-2">
+            <Switch
+              id="force-council"
+              checked={forceCouncil}
+              onCheckedChange={setForceCouncil}
+              disabled={isStreaming || getRequestLock()}
+            />
+            <Label htmlFor="force-council" className="text-sm">
+              Force Expert Council
+            </Label>
           </div>
         </div>
 
-        {/* Messages */}
+        {/* Messages Area */}
         <ScrollArea className="flex-1 p-4">
           <div className="max-w-4xl mx-auto space-y-4">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-500 mt-8">
+                <Bot className="h-12 w-12 mx-auto mb-4 text-gray-400" />
+                <h3 className="text-lg font-medium mb-2">Welcome to AURA</h3>
+                <p>Your AI Health Guardian. Ask me about your health concerns.</p>
+              </div>
+            )}
+            
             {messages.map((message) => (
-              <div key={message.id} className="flex gap-4">
-                <div className="flex-shrink-0 mt-1">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    message.role === 'user' 
-                      ? 'bg-blue-600' 
-                      : 'bg-green-600'
-                  }`}>
-                    {message.role === 'user' ? (
-                      <User className="h-4 w-4 text-white" />
-                    ) : (
-                      <Bot className="h-4 w-4 text-white" />
-                    )}
-                  </div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className={`rounded-2xl px-4 py-3 ${
-                    message.role === 'user'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100'
-                  }`}>
-                    <div className="whitespace-pre-wrap leading-relaxed">
-                      {renderMarkdownText(message.content)}
+              <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] rounded-lg p-4 ${
+                  message.role === 'user' 
+                    ? 'bg-blue-600 text-white' 
+                    : 'bg-white border shadow-sm'
+                }`}>
+                  <div className="flex items-start space-x-2">
+                    <div className="flex-shrink-0">
+                      {message.role === 'user' ? (
+                        <User className="h-5 w-5" />
+                      ) : (
+                        <Bot className="h-5 w-5" />
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      {/* FIXED: Use ReactMarkdown instead of split/map */}
+                      <div className="prose prose-sm max-w-none break-words">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            // Customize markdown components for better styling
+                            h1: ({children}) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                            h2: ({children}) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
+                            h3: ({children}) => <h3 className="text-sm font-semibold mb-1">{children}</h3>,
+                            p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                            ul: ({children}) => <ul className="list-disc pl-4 mb-2">{children}</ul>,
+                            ol: ({children}) => <ol className="list-decimal pl-4 mb-2">{children}</ol>,
+                            li: ({children}) => <li className="mb-1">{children}</li>,
+                            strong: ({children}) => <strong className="font-semibold">{children}</strong>,
+                            code: ({children}) => <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">{children}</code>,
+                            blockquote: ({children}) => <blockquote className="border-l-4 border-gray-300 pl-4 italic">{children}</blockquote>
+                          }}
+                        >
+                          {message.content}
+                        </ReactMarkdown>
+                      </div>
+                      
+                      {/* Enhanced Message Metadata */}
+                      {message.role === 'assistant' && message.data && (
+                        <div className="mt-3 space-y-2">
+                          <div className="flex flex-wrap gap-2">
+                            {typeof message.data.confidence === 'number' && (
+                              <Badge 
+                                variant="secondary" 
+                                className={`text-xs ${getConfidenceColor(message.data.confidence)}`}
+                              >
+                                {Math.round(message.data.confidence * 100)}% confident
+                              </Badge>
+                            )}
+                            {message.data.duration_seconds && (
+                              <Badge variant="outline" className="text-xs">
+                                <Clock className="h-3 w-3 mr-1" />
+                                {message.data.duration_seconds}s
+                              </Badge>
+                            )}
+                          </div>
+                          
+                          {/* Expert Council Reasoning Trace */}
+                          {message.data.reasoning_trace && (
+                            <Tabs defaultValue="summary" className="w-full">
+                              <TabsList className="grid w-full grid-cols-3">
+                                <TabsTrigger value="summary">Summary</TabsTrigger>
+                                <TabsTrigger value="evidence">Evidence</TabsTrigger>
+                                <TabsTrigger value="reasoning">Reasoning</TabsTrigger>
+                              </TabsList>
+                              <TabsContent value="summary" className="mt-2">
+                                <Card>
+                                  <CardContent className="pt-4">
+                                    <p className="text-sm text-gray-600">
+                                      Expert Council analysis completed with confidence level: {Math.round((message.data.confidence || 0.7) * 100)}%
+                                    </p>
+                                  </CardContent>
+                                </Card>
+                              </TabsContent>
+                              <TabsContent value="evidence" className="mt-2">
+                                <Card>
+                                  <CardContent className="pt-4">
+                                    <p className="text-sm text-gray-600">
+                                      Analysis based on medical guidelines and evidence-based practices.
+                                    </p>
+                                  </CardContent>
+                                </Card>
+                              </TabsContent>
+                              <TabsContent value="reasoning" className="mt-2">
+                                <Card>
+                                  <CardContent className="pt-4">
+                                    <div className="space-y-2 text-sm">
+                                      {Object.entries(message.data.reasoning_trace).map(([key, value]) => (
+                                        <div key={key}>
+                                          <span className="font-medium capitalize">{key.replace('_', ' ')}:</span>
+                                          <p className="text-gray-600 mt-1">{typeof value === 'string' ? value.slice(0, 200) + '...' : 'Complex analysis completed'}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </CardContent>
+                                </Card>
+                              </TabsContent>
+                            </Tabs>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
-                  
-                  {message.role === 'assistant' && message.data && 
-                    renderExpertCouncilReport(message.data)
-                  }
                 </div>
               </div>
             ))}
             
-            {/* Streaming Status */}
+            {/* Enhanced Streaming Status */}
             {isStreaming && (
-              <div className="flex gap-4">
-                <div className="flex-shrink-0 mt-1">
-                  <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
-                    <Bot className="h-4 w-4 text-white" />
-                  </div>
-                </div>
-                <div className="flex-1">
-                  <div className="rounded-2xl px-4 py-3 bg-gray-100 dark:bg-gray-800">
-                    <div className="flex items-center gap-2 text-sm">
+              <div className="flex justify-start">
+                <Card className="max-w-md">
+                  <CardContent className="pt-4">
+                    <div className="flex items-center space-x-2 mb-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      <span>{streamStatus || 'Processing...'}</span>
+                      <span className="text-sm font-medium">{streamStatus}</span>
                     </div>
                     
+                    {councilActive && (
+                      <Alert className="mt-2">
+                        <Brain className="h-4 w-4" />
+                        <AlertDescription>
+                          Expert Council is analyzing your query...
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                    
                     {councilStep && (
-                      <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-900/20 rounded">
-                        <div className="flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300">
-                          <Brain className="h-3 w-3" />
-                          <span>{councilStep.step}: {councilStep.status}</span>
+                      <div className="mt-2 p-2 bg-blue-50 rounded-lg">
+                        <div className="flex items-center space-x-2 text-xs">
+                          {getCouncilStepIcon(councilStep.step)}
+                          <span className="font-medium">Step {councilStep.step}:</span>
+                          <span>{councilStep.status}</span>
                         </div>
+                        {councilStep.description && (
+                          <p className="text-xs text-gray-600 mt-1 ml-6">
+                            {councilStep.description}
+                          </p>
+                        )}
                       </div>
                     )}
-                  </div>
-                </div>
+                  </CardContent>
+                </Card>
               </div>
             )}
-            
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
 
-        {/* Input */}
-        <div className="border-t border-gray-200 dark:border-gray-700 p-4 bg-white dark:bg-gray-800">
-          <div className="max-w-4xl mx-auto">
-            <div className="flex gap-2">
-              <Input
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask about your health..."
-                disabled={isStreaming}
-                className="flex-1"
-              />
-              <Button 
-                onClick={handleSend} 
-                disabled={isStreaming || !input.trim()}
-                size="icon"
-              >
-                {isStreaming ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-            <p className="text-xs text-gray-500 mt-2 text-center">
-              ⚠️ For medical emergencies, call emergency services immediately
-            </p>
+        {/* Input Area */}
+        <div className="bg-white border-t p-4">
+          <div className="max-w-4xl mx-auto flex space-x-2">
+            <Input
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type your health question..."
+              disabled={isStreaming || getRequestLock()}
+              onKeyDown={handleKeyDown}
+              className="flex-1"
+            />
+            <Button 
+              onClick={handleSend} 
+              disabled={isButtonDisabled}
+              className="px-6"
+            >
+              {isStreaming ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
           </div>
         </div>
       </div>

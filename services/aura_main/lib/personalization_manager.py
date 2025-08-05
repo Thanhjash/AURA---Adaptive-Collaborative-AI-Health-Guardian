@@ -792,3 +792,70 @@ class PersonalizationManager:
             logger.error(f"Failed to get recent council sessions with server-side filtering: {e}")
             # Return empty list on failure, the endpoint will handle the HTTP response
             return []
+
+    async def get_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get complete session data including conversation state and symptom profile"""
+        try:
+            session_ref = self.db.collection('sessions').document(session_id)
+            doc = await session_ref.get()
+            
+            if doc.exists:
+                session_data = doc.to_dict()
+                logger.info(f"Retrieved session data for: {session_id}")
+                return session_data
+            else:
+                logger.info(f"No session found: {session_id}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to get session data: {e}")
+            return None
+
+    async def save_session_data(self, session_id: str, session_data: Dict[str, Any]) -> bool:
+        """Save complete session data including message history and state"""
+        try:
+            session_ref = self.db.collection('sessions').document(session_id)
+            
+            # Add timestamp
+            session_data["last_updated"] = datetime.now(timezone.utc)
+            
+            await session_ref.set(session_data)
+            logger.info(f"Saved session data: {session_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to save session data: {e}")
+            return False
+
+    async def get_user_sessions(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get list of sessions for a user (for chat history sidebar)"""
+        try:
+            sessions_ref = (
+                self.db.collection('sessions')
+                .where('user_id', '==', user_id)
+                .order_by('last_updated', direction=firestore.Query.DESCENDING)
+                .limit(limit)
+            )
+            
+            docs = await sessions_ref.get()
+            
+            sessions = []
+            for doc in docs:
+                session_data = doc.to_dict()
+                # Extract first user message as title
+                messages = session_data.get('message_history', [])
+                first_user_msg = next((msg for msg in messages if msg.get('role') == 'user'), None)
+                title = first_user_msg.get('content', 'New Conversation')[:50] if first_user_msg else 'New Conversation'
+                
+                sessions.append({
+                    "session_id": doc.id,
+                    "title": title,
+                    "timestamp": session_data.get('last_updated', session_data.get('created_at')),
+                    "message_count": len(messages)
+                })
+            
+            return sessions
+            
+        except Exception as e:
+            logger.error(f"Failed to get user sessions: {e}")
+            return []

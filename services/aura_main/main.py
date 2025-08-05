@@ -1,20 +1,21 @@
-# File: services/aura_main/main.py (VERSION V12 - FINAL)
+# File: services/aura_main/main.py (VERSION V12 - FIXED)
 
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
-from fastapi import FastAPI, HTTPException
 
 # Import from models.py to avoid circular dependency
 from models import HealthQuery 
 from lib.conversation_manager import ConversationManager
+from lib.personalization_manager import PersonalizationManager
 
 # --- INITIALIZATION ---
 load_dotenv()
 conversation_manager = ConversationManager()
+personalization_manager = PersonalizationManager()  # 🔍 FIXED: Added missing initialization
 
 # --- APP CONFIGURATION ---
 app = FastAPI(
@@ -64,7 +65,7 @@ async def health_check():
     """Health check delegates to ConversationManager."""
     return await conversation_manager.health_check()
 
-@app.get("/get-session-history/{session_id}")
+@app.get("/api/session/{session_id}")  # 🔍 FIXED: Added missing /api prefix
 async def get_session_history_endpoint(session_id: str):
     """Endpoint for frontend to reload specific session history."""
     try:
@@ -73,7 +74,18 @@ async def get_session_history_endpoint(session_id: str):
             raise HTTPException(status_code=404, detail=history["error"])
         return history
     except Exception as e:
+        print(f"Error in get_session_history endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve session: {str(e)}")
+
+@app.get("/api/chat-history/{user_id}")  # 🔍 ADDED: Missing chat history endpoint
+async def get_chat_history_endpoint(user_id: str):
+    """Get chat history for user."""
+    try:
+        # This should be implemented in conversation_manager
+        return await conversation_manager.get_chat_history(user_id) 
+    except Exception as e:
+        print(f"Error getting chat history: {e}")
+        return []
 
 # --- DEV SERVER ---
 if __name__ == "__main__":

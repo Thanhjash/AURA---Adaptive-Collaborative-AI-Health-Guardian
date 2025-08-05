@@ -29,8 +29,8 @@ class ExpertCouncil:
         if self.gemini_api_key and GENAI_AVAILABLE:
             try:
                 genai.configure(api_key=self.gemini_api_key)
-                self.gemini_client_flash = genai.GenerativeModel('gemini-1.5-flash-latest')
-                self.gemini_client_pro = genai.GenerativeModel('gemini-1.5-pro-latest')
+                self.gemini_client_flash = genai.GenerativeModel('gemini-2.0-flash')
+                self.gemini_client_pro = genai.GenerativeModel('gemini-2.5-flash')
                 print("✅ [EXPERT-COUNCIL] Gemini clients initialized.")
             except Exception as e:
                 print(f"⚠️ [EXPERT-COUNCIL] Gemini configuration failed: {e}")
