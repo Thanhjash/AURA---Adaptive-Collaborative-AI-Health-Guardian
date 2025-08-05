@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ScrollArea } from '@/components/ui/scroll-area'
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import ReactMarkdown from 'react-markdown'
@@ -228,7 +228,7 @@ export function ChatInterface() {
     setCurrentSession(sessionId)
 
     try {
-      const response = await fetch(`${API_BASE}/api/session/${sessionId}`)
+      const response = await fetch(`${API_BASE}/session/${sessionId}`)
       if (!response.ok) {
         if (response.status === 404) {
           console.log('Session not found, starting fresh')
@@ -499,10 +499,10 @@ export function ChatInterface() {
   const isButtonDisabled = isStreaming || getRequestLock() || !input.trim()
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-gray-50 overflow-hidden">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
-        <div className="flex items-center justify-between h-16 px-4 border-b">
+      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0 flex flex-col`}>
+        <div className="flex items-center justify-between h-16 px-4 border-b flex-shrink-0">
           <h1 className="text-xl font-bold text-gray-900">AURA</h1>
           <Button 
             variant="ghost" 
@@ -514,53 +514,59 @@ export function ChatInterface() {
           </Button>
         </div>
         
-        <div className="p-4">
-          <Button onClick={handleNewChat} className="w-full mb-4">
-            <Plus className="h-4 w-4 mr-2" />
-            New Chat
-          </Button>
-          
-          <div className="flex justify-between items-center mb-2">
-            <h2 className="text-sm font-medium text-gray-700">Chat History</h2>
-            <Button 
-              variant="ghost" 
-              size="sm" 
-              onClick={clearAllHistory}
-              className="text-xs"
-            >
-              <Trash2 className="h-3 w-3" />
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="p-4 flex-shrink-0">
+            <Button onClick={handleNewChat} className="w-full mb-4">
+              <Plus className="h-4 w-4 mr-2" />
+              New Chat
             </Button>
+            
+            <div className="flex justify-between items-center mb-2">
+              <h2 className="text-sm font-medium text-gray-700">Chat History</h2>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={clearAllHistory}
+                className="text-xs"
+              >
+                <Trash2 className="h-3 w-3" />
+              </Button>
+            </div>
           </div>
           
-          <ScrollArea className="h-[calc(100vh-200px)]">
-            <div className="space-y-2">
-              {chatHistory.map((item) => (
-                <div
-                  key={item.session_id}
-                  onClick={() => loadChatSession(item.session_id)}
-                  className={`p-3 rounded cursor-pointer transition-colors ${
-                    currentSession === item.session_id
-                      ? 'bg-blue-100 text-blue-800'
-                      : 'hover:bg-gray-100'
-                  }`}
-                >
-                  <div className="text-sm font-medium truncate">
-                    {item.title}
+          {/* Fixed ScrollArea for chat history */}
+          <div className="flex-1 px-4 pb-4 overflow-hidden">
+            <ScrollArea className="h-full">
+              <div className="space-y-2 pr-4">
+                {chatHistory.map((item) => (
+                  <div
+                    key={item.session_id}
+                    onClick={() => loadChatSession(item.session_id)}
+                    className={`p-3 rounded cursor-pointer transition-colors break-words ${
+                      currentSession === item.session_id
+                        ? 'bg-blue-100 text-blue-800'
+                        : 'hover:bg-gray-100'
+                    }`}
+                  >
+                    <div className="text-sm font-medium break-words line-clamp-2">
+                      {item.title}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {new Date(item.timestamp).toLocaleDateString()}
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    {new Date(item.timestamp).toLocaleDateString()}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </ScrollArea>
+                ))}
+              </div>
+              <ScrollBar orientation="vertical" />
+            </ScrollArea>
+          </div>
         </div>
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="h-16 bg-white border-b flex items-center justify-between px-4">
+        <div className="h-16 bg-white border-b flex items-center justify-between px-4 flex-shrink-0">
           <div className="flex items-center">
             <Button
               variant="ghost"
@@ -589,168 +595,195 @@ export function ChatInterface() {
           </div>
         </div>
 
-        {/* Messages Area */}
-        <ScrollArea className="flex-1 p-4">
-          <div className="max-w-4xl mx-auto space-y-4">
-            {messages.length === 0 && (
-              <div className="text-center text-gray-500 mt-8">
-                <Bot className="h-12 w-12 mx-auto mb-4 text-gray-400" />
-                <h3 className="text-lg font-medium mb-2">Welcome to AURA</h3>
-                <p>Your AI Health Guardian. Ask me about your health concerns.</p>
-              </div>
-            )}
-            
-            {messages.map((message) => (
-              <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] rounded-lg p-4 ${
-                  message.role === 'user' 
-                    ? 'bg-blue-600 text-white' 
-                    : 'bg-white border shadow-sm'
-                }`}>
-                  <div className="flex items-start space-x-2">
-                    <div className="flex-shrink-0">
-                      {message.role === 'user' ? (
-                        <User className="h-5 w-5" />
-                      ) : (
-                        <Bot className="h-5 w-5" />
-                      )}
-                    </div>
-                    <div className="flex-1">
-                      {/* FIXED: Use ReactMarkdown instead of split/map */}
-                      <div className="prose prose-sm max-w-none break-words">
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            // Customize markdown components for better styling
-                            h1: ({children}) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
-                            h2: ({children}) => <h2 className="text-md font-semibold mb-2">{children}</h2>,
-                            h3: ({children}) => <h3 className="text-sm font-semibold mb-1">{children}</h3>,
-                            p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                            ul: ({children}) => <ul className="list-disc pl-4 mb-2">{children}</ul>,
-                            ol: ({children}) => <ol className="list-decimal pl-4 mb-2">{children}</ol>,
-                            li: ({children}) => <li className="mb-1">{children}</li>,
-                            strong: ({children}) => <strong className="font-semibold">{children}</strong>,
-                            code: ({children}) => <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">{children}</code>,
-                            blockquote: ({children}) => <blockquote className="border-l-4 border-gray-300 pl-4 italic">{children}</blockquote>
-                          }}
-                        >
-                          {message.content}
-                        </ReactMarkdown>
+        {/* Messages Area with proper scrolling */}
+        <div className="flex-1 overflow-hidden">
+          <ScrollArea className="h-full p-4">
+            <div className="max-w-4xl mx-auto space-y-4">
+              {messages.length === 0 && (
+                <div className="text-center text-gray-500 mt-8">
+                  <Bot className="h-12 w-12 mx-auto mb-4 text-gray-400" />
+                  <h3 className="text-lg font-medium mb-2">Welcome to AURA</h3>
+                  <p>Your AI Health Guardian. Ask me about your health concerns.</p>
+                </div>
+              )}
+              
+              {messages.map((message) => (
+                <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-lg p-4 ${
+                    message.role === 'user' 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-white border shadow-sm'
+                  }`}>
+                    <div className="flex items-start space-x-2">
+                      <div className="flex-shrink-0">
+                        {message.role === 'user' ? (
+                          <User className="h-5 w-5" />
+                        ) : (
+                          <Bot className="h-5 w-5" />
+                        )}
                       </div>
-                      
-                      {/* Enhanced Message Metadata */}
-                      {message.role === 'assistant' && message.data && (
-                        <div className="mt-3 space-y-2">
-                          <div className="flex flex-wrap gap-2">
-                            {typeof message.data.confidence === 'number' && (
-                              <Badge 
-                                variant="secondary" 
-                                className={`text-xs ${getConfidenceColor(message.data.confidence)}`}
-                              >
-                                {Math.round(message.data.confidence * 100)}% confident
-                              </Badge>
-                            )}
-                            {message.data.duration_seconds && (
-                              <Badge variant="outline" className="text-xs">
-                                <Clock className="h-3 w-3 mr-1" />
-                                {message.data.duration_seconds}s
-                              </Badge>
+                      <div className="flex-1 min-w-0 overflow-hidden">
+                        {/* Enhanced ReactMarkdown with proper word wrapping */}
+                        <div className="prose prose-sm max-w-none break-words overflow-wrap-anywhere">
+                          <ReactMarkdown 
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              // Enhanced components with better overflow handling
+                              h1: ({children}) => <h1 className="text-lg font-bold mb-2 break-words">{children}</h1>,
+                              h2: ({children}) => <h2 className="text-md font-semibold mb-2 break-words">{children}</h2>,
+                              h3: ({children}) => <h3 className="text-sm font-semibold mb-1 break-words">{children}</h3>,
+                              p: ({children}) => <p className="mb-2 last:mb-0 break-words">{children}</p>,
+                              ul: ({children}) => <ul className="list-disc pl-4 mb-2">{children}</ul>,
+                              ol: ({children}) => <ol className="list-decimal pl-4 mb-2">{children}</ol>,
+                              li: ({children}) => <li className="mb-1 break-words">{children}</li>,
+                              strong: ({children}) => <strong className="font-semibold break-words">{children}</strong>,
+                              code: ({children}) => <code className="bg-gray-100 px-1 py-0.5 rounded text-xs break-all">{children}</code>,
+                              blockquote: ({children}) => <blockquote className="border-l-4 border-gray-300 pl-4 italic break-words">{children}</blockquote>,
+                              // Handle long URLs and links
+                              a: ({href, children}) => <a href={href} className="text-blue-600 hover:underline break-all">{children}</a>,
+                              // Handle tables with horizontal scroll
+                              table: ({children}) => (
+                                <div className="overflow-x-auto">
+                                  <table className="min-w-full border-collapse border border-gray-300">
+                                    {children}
+                                  </table>
+                                </div>
+                              ),
+                              // Handle preformatted code blocks
+                              pre: ({children}) => (
+                                <ScrollArea className="w-full">
+                                  <pre className="bg-gray-100 p-2 rounded text-xs overflow-x-auto whitespace-pre">
+                                    {children}
+                                  </pre>
+                                  <ScrollBar orientation="horizontal" />
+                                </ScrollArea>
+                              )
+                            }}
+                          >
+                            {message.content}
+                          </ReactMarkdown>
+                        </div>
+                        
+                        {/* Enhanced Message Metadata */}
+                        {message.role === 'assistant' && message.data && (
+                          <div className="mt-3 space-y-2">
+                            <div className="flex flex-wrap gap-2">
+                              {typeof message.data.confidence === 'number' && (
+                                <Badge 
+                                  variant="secondary" 
+                                  className={`text-xs ${getConfidenceColor(message.data.confidence)}`}
+                                >
+                                  {Math.round(message.data.confidence * 100)}% confident
+                                </Badge>
+                              )}
+                              {message.data.duration_seconds && (
+                                <Badge variant="outline" className="text-xs">
+                                  <Clock className="h-3 w-3 mr-1" />
+                                  {message.data.duration_seconds}s
+                                </Badge>
+                              )}
+                            </div>
+                            
+                            {/* Expert Council Reasoning Trace with scrollable content */}
+                            {message.data.reasoning_trace && (
+                              <Tabs defaultValue="summary" className="w-full">
+                                <TabsList className="grid w-full grid-cols-3">
+                                  <TabsTrigger value="summary">Summary</TabsTrigger>
+                                  <TabsTrigger value="evidence">Evidence</TabsTrigger>
+                                  <TabsTrigger value="reasoning">Reasoning</TabsTrigger>
+                                </TabsList>
+                                <TabsContent value="summary" className="mt-2">
+                                  <Card>
+                                    <CardContent className="pt-4">
+                                      <p className="text-sm text-gray-600 break-words">
+                                        Expert Council analysis completed with confidence level: {Math.round((message.data.confidence || 0.7) * 100)}%
+                                      </p>
+                                    </CardContent>
+                                  </Card>
+                                </TabsContent>
+                                <TabsContent value="evidence" className="mt-2">
+                                  <Card>
+                                    <CardContent className="pt-4">
+                                      <p className="text-sm text-gray-600 break-words">
+                                        Analysis based on medical guidelines and evidence-based practices.
+                                      </p>
+                                    </CardContent>
+                                  </Card>
+                                </TabsContent>
+                                <TabsContent value="reasoning" className="mt-2">
+                                  <Card>
+                                    <CardContent className="pt-4">
+                                      <ScrollArea className="max-h-60">
+                                        <div className="space-y-2 text-sm pr-4">
+                                          {Object.entries(message.data.reasoning_trace).map(([key, value]) => (
+                                            <div key={key}>
+                                              <span className="font-medium capitalize">{key.replace('_', ' ')}:</span>
+                                              <p className="text-gray-600 mt-1 break-words">
+                                                {typeof value === 'string' ? value.slice(0, 200) + '...' : 'Complex analysis completed'}
+                                              </p>
+                                            </div>
+                                          ))}
+                                        </div>
+                                        <ScrollBar orientation="vertical" />
+                                      </ScrollArea>
+                                    </CardContent>
+                                  </Card>
+                                </TabsContent>
+                              </Tabs>
                             )}
                           </div>
-                          
-                          {/* Expert Council Reasoning Trace */}
-                          {message.data.reasoning_trace && (
-                            <Tabs defaultValue="summary" className="w-full">
-                              <TabsList className="grid w-full grid-cols-3">
-                                <TabsTrigger value="summary">Summary</TabsTrigger>
-                                <TabsTrigger value="evidence">Evidence</TabsTrigger>
-                                <TabsTrigger value="reasoning">Reasoning</TabsTrigger>
-                              </TabsList>
-                              <TabsContent value="summary" className="mt-2">
-                                <Card>
-                                  <CardContent className="pt-4">
-                                    <p className="text-sm text-gray-600">
-                                      Expert Council analysis completed with confidence level: {Math.round((message.data.confidence || 0.7) * 100)}%
-                                    </p>
-                                  </CardContent>
-                                </Card>
-                              </TabsContent>
-                              <TabsContent value="evidence" className="mt-2">
-                                <Card>
-                                  <CardContent className="pt-4">
-                                    <p className="text-sm text-gray-600">
-                                      Analysis based on medical guidelines and evidence-based practices.
-                                    </p>
-                                  </CardContent>
-                                </Card>
-                              </TabsContent>
-                              <TabsContent value="reasoning" className="mt-2">
-                                <Card>
-                                  <CardContent className="pt-4">
-                                    <div className="space-y-2 text-sm">
-                                      {Object.entries(message.data.reasoning_trace).map(([key, value]) => (
-                                        <div key={key}>
-                                          <span className="font-medium capitalize">{key.replace('_', ' ')}:</span>
-                                          <p className="text-gray-600 mt-1">{typeof value === 'string' ? value.slice(0, 200) + '...' : 'Complex analysis completed'}</p>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </CardContent>
-                                </Card>
-                              </TabsContent>
-                            </Tabs>
-                          )}
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
-            
-            {/* Enhanced Streaming Status */}
-            {isStreaming && (
-              <div className="flex justify-start">
-                <Card className="max-w-md">
-                  <CardContent className="pt-4">
-                    <div className="flex items-center space-x-2 mb-2">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span className="text-sm font-medium">{streamStatus}</span>
-                    </div>
-                    
-                    {councilActive && (
-                      <Alert className="mt-2">
-                        <Brain className="h-4 w-4" />
-                        <AlertDescription>
-                          Expert Council is analyzing your query...
-                        </AlertDescription>
-                      </Alert>
-                    )}
-                    
-                    {councilStep && (
-                      <div className="mt-2 p-2 bg-blue-50 rounded-lg">
-                        <div className="flex items-center space-x-2 text-xs">
-                          {getCouncilStepIcon(councilStep.step)}
-                          <span className="font-medium">Step {councilStep.step}:</span>
-                          <span>{councilStep.status}</span>
-                        </div>
-                        {councilStep.description && (
-                          <p className="text-xs text-gray-600 mt-1 ml-6">
-                            {councilStep.description}
-                          </p>
-                        )}
+              ))}
+              
+              {/* Enhanced Streaming Status */}
+              {isStreaming && (
+                <div className="flex justify-start">
+                  <Card className="max-w-md">
+                    <CardContent className="pt-4">
+                      <div className="flex items-center space-x-2 mb-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span className="text-sm font-medium break-words">{streamStatus}</span>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        </ScrollArea>
+                      
+                      {councilActive && (
+                        <Alert className="mt-2">
+                          <Brain className="h-4 w-4" />
+                          <AlertDescription>
+                            Expert Council is analyzing your query...
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      
+                      {councilStep && (
+                        <div className="mt-2 p-2 bg-blue-50 rounded-lg">
+                          <div className="flex items-center space-x-2 text-xs">
+                            {getCouncilStepIcon(councilStep.step)}
+                            <span className="font-medium">Step {councilStep.step}:</span>
+                            <span className="break-words">{councilStep.status}</span>
+                          </div>
+                          {councilStep.description && (
+                            <p className="text-xs text-gray-600 mt-1 ml-6 break-words">
+                              {councilStep.description}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+            <ScrollBar orientation="vertical" />
+          </ScrollArea>
+        </div>
 
         {/* Input Area */}
-        <div className="bg-white border-t p-4">
+        <div className="bg-white border-t p-4 flex-shrink-0">
           <div className="max-w-4xl mx-auto flex space-x-2">
             <Input
               ref={inputRef}

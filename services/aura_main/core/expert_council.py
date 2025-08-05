@@ -30,8 +30,8 @@ class ExpertCouncil:
             try:
                 genai.configure(api_key=self.gemini_api_key)
                 # FIXED: Use standard, publicly available model names
-                self.gemini_client_flash = genai.GenerativeModel('gemini-1.5-flash-latest')
-                self.gemini_client_pro = genai.GenerativeModel('gemini-1.5-pro-latest')
+                self.gemini_client_flash = genai.GenerativeModel('gemini-2.0-flash')
+                self.gemini_client_pro = genai.GenerativeModel('gemini-2.5-flash')
                 print("✅ [EXPERT-COUNCIL] Gemini clients initialized.")
             except Exception as e:
                 print(f"⚠️ [EXPERT-COUNCIL] Gemini configuration failed: {e}")
@@ -51,9 +51,12 @@ class ExpertCouncil:
 
             # Step 2: Parallel Analysis (Coordinator, Reasoner, Critic)
             yield {"type": "progress", "step": "parallel_analysis", "status": "Convening specialists..."}
-            
+
+            await asyncio.sleep(0.5) 
             planning_task = asyncio.create_task(self._coordinator_planning(patient_case, user_context, rag_context))
+            await asyncio.sleep(0.5)
             reasoning_task = asyncio.create_task(self._complex_reasoning(patient_case, user_context, rag_context))
+            await asyncio.sleep(0.5)
             critique_task = asyncio.create_task(self._safety_critique(patient_case, user_context, rag_context))
             
             coordinator_analysis, complex_analysis, safety_critique = await asyncio.gather(
