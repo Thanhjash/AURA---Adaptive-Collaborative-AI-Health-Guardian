@@ -42,48 +42,27 @@ class ConversationManager:
 
     # === CORE STREAMING METHOD ===
     async def stream_turn(self, query: HealthQuery) -> AsyncGenerator[str, None]:
-        """Central brain manages complete conversation turn with memory"""
         session_state = None
         assistant_response_content = ""
         
         try:
-            # 1. Load or Create Session State
             yield self._sse_event("progress", {"step": "session", "status": "Loading session..."})
             session_state = await self._load_or_create_session_state(query)
             
-            # 2. 🧠 LISTEN & UPDATE SYMPTOM PROFILE (New!)
             yield self._sse_event("progress", {"step": "understanding", "status": "Understanding your message..."})
             updated_profile = await self._update_symptom_profile(query, session_state)
             session_state['symptom_profile'] = updated_profile
             
-            # 3. 🔍 PRIORITY CHECK: Force Expert Council
-            if query.force_expert_council:
-                yield self._sse_event("council_started", {"message": "Expert Council activated by user request"})
-                
-                user_context, rag_context = await self._load_contexts_cached(query)
-                
-                async for chunk in self._stream_expert_council_once(query, user_context, rag_context):
-                    if chunk.startswith('data: {"token":'):
-                        # Extract token for building full response
-                        try:
-                            token_data = json.loads(chunk.split('data: ')[1])
-                            assistant_response_content += token_data.get('token', '')
-                        except:
-                            pass
-                    yield chunk
-                
-                yield self._sse_event("stream_end", {"session_id": query.session_id, "message": "Expert Council Complete"})
-                return
-            
-            # 4. Load Context with Cache
             yield self._sse_event("progress", {"step": "context", "status": "Loading context..."})
             user_context, rag_context = await self._load_contexts_cached(query)
             
-            # 5. 🎯 INTELLIGENT ROUTING with State Awareness
             yield self._sse_event("progress", {"step": "triage", "status": "Analyzing query..."})
-            routing = await self._decide_routing_strategy(query, session_state, user_context, rag_context)
+            
+            if query.force_expert_council:
+                routing = {"strategy": "run_council"}
+            else:
+                routing = await self._decide_routing_strategy(query, session_state, user_context, rag_context)
 
-            # 6. Execute strategy and capture response
             strategy = routing.get("strategy", "clarify")
             yield self._sse_event("progress", {"step": "action", "status": f"Strategy: {strategy}"})
 
@@ -95,7 +74,8 @@ class ConversationManager:
             elif strategy == "suggest_council":
                 stream_generator = self._stream_expert_council_suggestion(query, session_state)
             elif strategy == "run_council":
-                stream_generator = self._stream_expert_council_once(query, user_context, rag_context)
+                # FIXED: Truyền cả session_state để lấy hồ sơ triệu chứng
+                stream_generator = self._stream_expert_council_once(query, session_state, user_context, rag_context)
             elif strategy == "clarify_council":
                 stream_generator = self._stream_clarify_council(query, session_state)
             else:
@@ -103,13 +83,10 @@ class ConversationManager:
                 yield self._sse_event("text_token", {"token": error_msg})
                 assistant_response_content = error_msg
 
-            # Stream and capture response
             if stream_generator:
                 assistant_response_content = ""
                 async for chunk in stream_generator:
-                    yield chunk  # Forward to client
-                    
-                    # Capture tokens for saving
+                    yield chunk
                     if 'data: {"token":' in chunk:
                         try:
                             data_str = chunk.split('data: ')[1]
@@ -120,13 +97,14 @@ class ConversationManager:
 
         except Exception as e:
             traceback.print_exc()
-            error_msg = f"Critical error: {str(e)}"
+            error_msg = f"A critical error occurred. Please try again later."
             yield self._sse_event("error", {"message": error_msg})
             assistant_response_content = error_msg
         finally:
             if session_state:
                 await self._save_session_state(session_state, query, assistant_response_content)
             yield self._sse_event("stream_end", {"session_id": query.session_id})
+
 
     # === NEW: SYMPTOM PROFILE MEMORY ===
     async def _update_symptom_profile(self, query: HealthQuery, session_state: dict) -> dict:
@@ -306,30 +284,37 @@ Be supportive and informative."""
             async for chunk in self._stream_text(fallback):
                 yield chunk
 
-    async def _stream_expert_council_once(self, query: HealthQuery, user_context: str, rag_context: str) -> AsyncGenerator[str, None]:
-        """Stream Expert Council analysis with proper async generator handling"""
+    async def _stream_expert_council_once(self, query_obj: HealthQuery, session_state: dict, user_context: str, rag_context: str) -> AsyncGenerator[str, None]:
+        """
+        FIXED: Stream Expert Council analysis using the FULL symptom profile as the query,
+        not just the user's last message (e.g., "yes").
+        """
         yield self._sse_event("council_started", {"message": "Convening Expert Council..."})
         
+        # --- ĐIỂM SỬA LỖI QUAN TRỌNG NHẤT ---
+        symptom_profile = session_state.get("symptom_profile", {})
+        if not symptom_profile:
+            # Fallback nếu không có profile, dùng query gốc của lượt đó
+            council_query_text = query_obj.query
+        else:
+            # Tạo ra một câu truy vấn đầy đủ, có cấu trúc cho Council
+            history_summary = " ".join([msg.get('content', '') for msg in session_state.get('message_history', [])])
+            council_query_text = f"Patient presents with the following symptoms and context: {json.dumps(symptom_profile)}. The recent conversation includes: '{history_summary[-1000:]}'. Please provide a comprehensive analysis."
+
+        print(f"COUNCIL INPUT: Using comprehensive query: '{council_query_text}'")
+
         try:
-            # FIXED: Use async generator correctly
             council_result = None
-            
-            async for event in expert_council.run_expert_council_with_progress(query.query, user_context, rag_context):
+            # Chạy council với "hồ sơ bệnh án", không phải "yes"
+            async for event in expert_council.run_expert_council_with_progress(council_query_text, user_context, rag_context):
                 event_type = event.get("type")
                 
                 if event_type == "progress":
-                    # Stream progress updates
-                    yield self._sse_event("council_step", {
-                        "step": event.get("step", ""),
-                        "status": event.get("status", ""),
-                        "description": event.get("description", "")
-                    })
+                    yield self._sse_event("council_step", event)
                 elif event_type == "result":
-                    # Final result
                     council_result = event.get("data")
                     break
             
-            # Stream the response text
             if council_result and council_result.get('user_response'):
                 response_text = council_result['user_response']
                 async for chunk in self._stream_text(response_text):
@@ -340,15 +325,10 @@ Be supportive and informative."""
                     yield chunk
                     
         except Exception as e:
-            print(f"Expert Council error: {e}")
-            import traceback
             traceback.print_exc()
-            
             error_text = "Expert Council encountered a technical issue. Providing standard medical guidance instead."
             async for chunk in self._stream_text(error_text):
                 yield chunk
-
-
 
     async def _stream_text(self, text: str) -> AsyncGenerator[str, None]:
         """Stream text token by token"""

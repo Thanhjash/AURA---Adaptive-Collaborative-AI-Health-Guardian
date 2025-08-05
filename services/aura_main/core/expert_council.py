@@ -1,4 +1,5 @@
-# File: services/aura_main/core/expert_council.py (VERSION V12.1 - OPTIMIZED)
+# File: services/aura_main/core/expert_council.py
+# VERSION: 12.2 - PROMPT OPTIMIZED
 
 import os
 import json
@@ -8,7 +9,6 @@ import uuid
 import re
 from typing import Dict, Any, AsyncGenerator
 
-# Expert Council uses Gemini for specialist roles
 try:
     import google.generativeai as genai
     GENAI_AVAILABLE = True
@@ -17,8 +17,8 @@ except ImportError:
 
 class ExpertCouncil:
     """
-    Expert Council V12.1 - Pure reasoning brain.
-    Receives full context and focuses on generating analysis via Gemini.
+    Expert Council V12.2 - Pure reasoning brain with optimized, context-aware prompts.
+    Receives a full patient case and focuses on generating high-quality analysis via Gemini.
     """
     def __init__(self):
         # Initialize Gemini clients for expert roles
@@ -29,8 +29,9 @@ class ExpertCouncil:
         if self.gemini_api_key and GENAI_AVAILABLE:
             try:
                 genai.configure(api_key=self.gemini_api_key)
-                self.gemini_client_flash = genai.GenerativeModel('gemini-2.0-flash')
-                self.gemini_client_pro = genai.GenerativeModel('gemini-2.5-flash')
+                # FIXED: Use standard, publicly available model names
+                self.gemini_client_flash = genai.GenerativeModel('gemini-1.5-flash-latest')
+                self.gemini_client_pro = genai.GenerativeModel('gemini-1.5-pro-latest')
                 print("✅ [EXPERT-COUNCIL] Gemini clients initialized.")
             except Exception as e:
                 print(f"⚠️ [EXPERT-COUNCIL] Gemini configuration failed: {e}")
@@ -38,7 +39,7 @@ class ExpertCouncil:
             print("⚠️ [EXPERT-COUNCIL] Gemini unavailable. Council will not function.")
             
     # --- MAIN WORKFLOW ---
-    async def run_expert_council_with_progress(self, query: str, user_context: str = "", rag_context: str = "") -> AsyncGenerator[Dict, None]:
+    async def run_expert_council_with_progress(self, patient_case: str, user_context: str = "", rag_context: str = "") -> AsyncGenerator[Dict, None]:
         session_id = f"council_{uuid.uuid4()}"
         start_time = asyncio.get_running_loop().time()
         
@@ -51,9 +52,9 @@ class ExpertCouncil:
             # Step 2: Parallel Analysis (Coordinator, Reasoner, Critic)
             yield {"type": "progress", "step": "parallel_analysis", "status": "Convening specialists..."}
             
-            planning_task = asyncio.create_task(self._coordinator_planning(query, user_context, rag_context))
-            reasoning_task = asyncio.create_task(self._complex_reasoning(query, user_context, rag_context))
-            critique_task = asyncio.create_task(self._safety_critique(query, user_context, rag_context))
+            planning_task = asyncio.create_task(self._coordinator_planning(patient_case, user_context, rag_context))
+            reasoning_task = asyncio.create_task(self._complex_reasoning(patient_case, user_context, rag_context))
+            critique_task = asyncio.create_task(self._safety_critique(patient_case, user_context, rag_context))
             
             coordinator_analysis, complex_analysis, safety_critique = await asyncio.gather(
                 planning_task, reasoning_task, critique_task
@@ -62,7 +63,7 @@ class ExpertCouncil:
             # Step 3: Consensus Synthesis
             yield {"type": "progress", "step": "synthesis", "status": "Synthesizing opinions..."}
             consensus_result = await self._consensus_synthesis(
-                query, coordinator_analysis, complex_analysis, safety_critique, rag_context
+                patient_case, coordinator_analysis, complex_analysis, safety_critique
             )
             
             # Step 4: Final Formatting
@@ -103,61 +104,94 @@ class ExpertCouncil:
             print(f"[EXPERT-COUNCIL] Gemini call failed: {e}")
             raise e
 
-    async def _coordinator_planning(self, query, user_context, rag_context):
-        prompt = f"""As Lead Medical Coordinator, provide a strategic analysis for this query. Focus on priority, required specialties, and initial hypothesis.
+    # --- OPTIMIZED SPECIALIST PROMPTS ---
+    async def _coordinator_planning(self, patient_case, user_context, rag_context):
+        prompt = f"""As a Lead Medical Coordinator, your task is to analyze the provided patient case and create a strategic plan.
 
-Query: {query}
-Context: {user_context}
-Knowledge: {rag_context[:500]}
+**PATIENT CASE:**
+{patient_case}
 
-Provide a structured analysis focusing on medical priority and specialty requirements."""
+**ADDITIONAL CONTEXT:**
+- User Profile: {user_context}
+- Related Medical Knowledge (RAG): {rag_context[:500]}
+
+**YOUR ANALYSIS (Focus on):**
+1.  **Urgency Level:** (e.g., Critical, High, Medium, Low)
+2.  **Initial Hypothesis:** What is the most likely issue?
+3.  **Required Information:** What key questions should be asked next?
+4.  **Specialties to Consult:** (e.g., Gastroenterology, Neurology)
+"""
         return await self._call_gemini_api(self.gemini_client_flash, prompt)
 
-    async def _complex_reasoning(self, query, user_context, rag_context):
-        prompt = f"""As an Advanced Medical Reasoning Specialist, provide a differential diagnosis, pattern recognition, and risk stratification. Use comprehensive medical reasoning.
+    async def _complex_reasoning(self, patient_case, user_context, rag_context):
+        prompt = f"""As an Advanced Medical Reasoning Specialist, your task is to perform a deep analysis of the patient case using your comprehensive medical knowledge.
 
-Query: {query}
-Context: {user_context}
-Knowledge: {rag_context[:1000]}
+**PATIENT CASE (Source of Truth):**
+{patient_case}
 
-Provide detailed differential diagnosis and risk assessment."""
+**ADDITIONAL CONTEXT:**
+- User Profile: {user_context}
+- Related Medical Knowledge (RAG): {rag_context[:1000]}
+
+**YOUR DETAILED ANALYSIS:**
+1.  **Differential Diagnoses:** List at least 3 potential conditions, from most to least likely.
+2.  **Pattern Recognition:** Are there any recognizable patterns or syndromes?
+3.  **Risk Stratification:** What are the immediate and long-term risks to the patient?
+"""
         return await self._call_gemini_api(self.gemini_client_pro, prompt)
 
-    async def _safety_critique(self, query, user_context, rag_context):
-        prompt = f"""As Chief Medical Safety Officer, review this case for safety concerns, red flags, and clinical blind spots.
+    async def _safety_critique(self, patient_case, user_context, rag_context):
+        prompt = f"""As the Chief Medical Safety Officer, your role is to identify all potential risks and safety concerns. Be critical and cautious.
 
-Query: {query}
-Context: {user_context}
-Knowledge: {rag_context[:500]}
+**PATIENT CASE:**
+{patient_case}
 
-Focus on safety concerns and potential risks that must be addressed."""
+**ADDITIONAL CONTEXT:**
+- User Profile: {user_context}
+- Related Medical Knowledge (RAG): {rag_context[:500]}
+
+**YOUR SAFETY REVIEW (Identify):**
+1.  **Red Flags:** List any symptoms that require immediate emergency attention.
+2.  **Potential Misinterpretations:** What could be misinterpreted from the user's description?
+3.  **Clinical Blind Spots:** What potential issues might be overlooked?
+4.  **Worst-Case Scenarios:** What are the most dangerous possibilities if the condition is left untreated?
+"""
         return await self._call_gemini_api(self.gemini_client_flash, prompt)
         
-    async def _consensus_synthesis(self, query, coordinator_analysis, complex_analysis, safety_critique, rag_context):
-        prompt = f"""Synthesize these expert opinions into a unified medical consensus.
+    async def _consensus_synthesis(self, patient_case, coordinator_analysis, complex_analysis, safety_critique):
+        prompt = f"""You are the Synthesis AI. Your task is to create a unified, actionable medical consensus based on the original patient case and the opinions of three specialists.
 
-Coordinator Analysis: {coordinator_analysis}
-Complex Reasoning: {complex_analysis}
-Safety Critique: {safety_critique}
+**ORIGINAL PATIENT CASE:**
+{patient_case}
 
-Task: Return ONLY a valid JSON object with these exact keys:
-- "primary_assessment": string describing main finding
-- "confidence_level": number from 0.0 to 1.0
-- "key_recommendations": array of recommendation strings
-- "safety_priorities": array of safety concern strings
+---
+**SPECIALIST OPINIONS:**
 
-Ensure valid JSON format."""
+**1. Coordinator's Plan:**
+{coordinator_analysis}
 
+**2. Reasoner's Diagnosis:**
+{complex_analysis}
+
+**3. Safety Officer's Critique:**
+{safety_critique}
+---
+
+**TASK:**
+Based on ALL the information above, return ONLY a valid JSON object with these exact keys:
+- "primary_assessment": A single, clear sentence summarizing the most likely medical situation.
+- "confidence_level": A number from 0.0 to 1.0 representing your confidence in the primary assessment.
+- "key_recommendations": An array of 3-5 clear, actionable steps for the user. Start with the most important one.
+- "safety_priorities": An array of the most critical "red flag" warnings from the Safety Officer's critique.
+
+Ensure the output is a single, valid JSON object and nothing else.
+"""
         response_text = await self._call_gemini_api(self.gemini_client_flash, prompt)
-        
         try:
-            # Extract JSON from response text
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group(0))
-            else:
-                # Fallback parsing
-                return json.loads(response_text.strip())
+            return json.loads(response_text.strip())
         except (json.JSONDecodeError, AttributeError) as e:
             print(f"JSON parsing failed: {e}")
             return {

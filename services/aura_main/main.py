@@ -25,21 +25,27 @@ app = FastAPI(
     lifespan=conversation_manager.lifespan
 )
 
-# --- MIDDLEWARE ---
+# --- CẤU HÌNH CORS MIDDLEWARE (FIXED) ---
+# Đây chính là "danh sách khách mời", cho phép Vercel và Localhost truy cập.
 ALLOWED_ORIGINS = [
-    os.getenv("FRONTEND_URL_VERCEL"),
-    os.getenv("FRONTEND_URL_EC2"), 
-    "http://localhost:3000",
+    os.getenv("FRONTEND_URL_VERCEL"),    # Vd: "https://aura-....vercel.app"
+    os.getenv("FRONTEND_URL_EC2"),       # Vd: "https://44.217.60.106.sslip.io"
+    "http://localhost:3000",             # Cho phép test ở local
 ]
-# Remove None values if env vars not set
+# Loại bỏ các giá trị None nếu biến môi trường không được đặt
 ALLOWED_ORIGINS = [origin for origin in ALLOWED_ORIGINS if origin]
+
+# Nếu danh sách trống (để phòng hờ), cho phép tất cả để debug
+if not ALLOWED_ORIGINS:
+    print("⚠️ WARNING: No CORS origins specified, allowing all for debug purposes.")
+    ALLOWED_ORIGINS = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,       # Chỉ cho phép các địa chỉ trong danh sách
+    allow_credentials=True,              # Cho phép gửi cookie/authentication
+    allow_methods=["*"],                 # Cho phép tất cả các phương thức (GET, POST, etc.)
+    allow_headers=["*"],                 # Cho phép tất cả các tiêu đề
 )
 
 # --- MAIN ENDPOINT ---
@@ -65,7 +71,7 @@ async def health_check():
     """Health check delegates to ConversationManager."""
     return await conversation_manager.health_check()
 
-@app.get("/api/session/{session_id}")  # 🔍 FIXED: Added missing /api prefix
+@app.get("/session/{session_id}")  # 🔍 FIXED: Added missing /api prefix
 async def get_session_history_endpoint(session_id: str):
     """Endpoint for frontend to reload specific session history."""
     try:
@@ -77,15 +83,15 @@ async def get_session_history_endpoint(session_id: str):
         print(f"Error in get_session_history endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve session: {str(e)}")
 
-@app.get("/api/chat-history/{user_id}")  # 🔍 ADDED: Missing chat history endpoint
-async def get_chat_history_endpoint(user_id: str):
-    """Get chat history for user."""
-    try:
-        # This should be implemented in conversation_manager
-        return await conversation_manager.get_chat_history(user_id) 
-    except Exception as e:
-        print(f"Error getting chat history: {e}")
-        return []
+# @app.get("/chat-history/{user_id}")  # 🔍 ADDED: Missing chat history endpoint
+# async def get_chat_history_endpoint(user_id: str):
+#     """Get chat history for user."""
+#     try:
+#         # This should be implemented in conversation_manager
+#         return await conversation_manager.get_chat_history(user_id) 
+#     except Exception as e:
+#         print(f"Error getting chat history: {e}")
+#         return []
 
 # --- DEV SERVER ---
 if __name__ == "__main__":
